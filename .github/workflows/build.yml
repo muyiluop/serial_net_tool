@@ -134,6 +134,7 @@ jobs:
 
   release:
     name: Attach to Release
+    if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
     permissions:
