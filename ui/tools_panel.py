@@ -1,0 +1,846 @@
+"""右侧工具面板：CRC / 校验和 / 进制转换 / Hex转文件 / 自动回复。
+
+全局工具（与会话无强关联），布局针对 240-340px 窄宽度优化。
+"""
+
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QTabWidget,
+    QFrame,
+    QComboBox,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QListWidget,
+    QListWidgetItem,
+    QGroupBox,
+    QFormLayout,
+    QSpinBox,
+    QCheckBox,
+    QRadioButton,
+    QButtonGroup,
+    QFileDialog,
+    QMessageBox,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt
+
+from ..core.utils import text_to_bytes, bytes_to_text
+from ..core.autoreply import ReplyRule
+from ..tools.crc import PRESETS, crc_hex
+from ..tools.check import all_checksums
+from ..tools.conv import int_to_base, swap_endian, str_to_hex, hex_to_str
+from ..core.config import Config
+from ..core.autoreply import AutoReplyEngine
+from ..core.i18n import tr
+
+
+def _parse_int(text: str) -> int:
+    """解析十进制或十六进制(0x前缀)字符串为整数。"""
+    s = text.strip()
+    if s.startswith("0x") or s.startswith("0X"):
+        return int(s, 16)
+    return int(s, 0)  # int(s, 0) 自动检测 0x/0o/0b 前缀
+
+
+class ToolsPanel(QWidget):
+    def __init__(
+        self, autoreply: AutoReplyEngine, config: Config, main_window=None, parent=None
+    ):
+        super().__init__(parent)
+        self.autoreply = autoreply
+        self.config = config
+        self.main_window = main_window
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("dock_tabs")
+        self.tabs.addTab(self._crc_tab(), tr("crc"))
+        self.tabs.addTab(self._checksum_tab(), tr("checksum"))
+        self.tabs.addTab(self._conv_tab(), tr("convert"))
+        self.tabs.addTab(self._hexfile_tab(), tr("hex_to_file"))
+        self.tabs.addTab(self._autoreply_tab(), tr("auto_reply"))
+        self.tabs.addTab(self._modbus_tab(), tr("modbus_frame"))
+        self._builtin_tab_count = self.tabs.count()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+        layout.addWidget(self.tabs, 1)
+
+    def add_dock_tab(self, name, widget):
+        """添加 dock 型插件 Tab。"""
+        self.tabs.addTab(widget, name)
+
+    def remove_plugin_tabs(self):
+        """移除所有非内置 Tab。"""
+        while self.tabs.count() > self._builtin_tab_count:
+            w = self.tabs.widget(self.tabs.count() - 1)
+            self.tabs.removeTab(self.tabs.count() - 1)
+            if w:
+                w.deleteLater()
+
+    # ================= CRC =================
+
+    def _crc_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+
+        self.crc_algo = QComboBox()
+        self.crc_algo.addItems(list(PRESETS.keys()))
+        layout.addWidget(self.crc_algo)
+
+        h = QHBoxLayout()
+        h.setSpacing(6)
+        self.crc_ascii = QRadioButton(tr("ascii"))
+        self.crc_hex = QRadioButton(tr("hex"))
+        self.crc_ascii.setChecked(True)
+        self.crc_bg = QButtonGroup(self)
+        self.crc_bg.addButton(self.crc_ascii)
+        self.crc_bg.addButton(self.crc_hex)
+        h.addWidget(self.crc_ascii)
+        h.addWidget(self.crc_hex)
+        h.addStretch()
+        layout.addLayout(h)
+
+        self.crc_in = QPlainTextEdit()
+        self.crc_in.setPlaceholderText(tr("input_data"))
+        layout.addWidget(self.crc_in, 1)
+
+        layout.addWidget(QLabel(tr("result")))
+        self.crc_out = QLineEdit()
+        self.crc_out.setReadOnly(True)
+        self.crc_out.setText("0")
+        layout.addWidget(self.crc_out)
+
+        self.crc_algo.currentTextChanged.connect(self._crc_update)
+        self.crc_in.textChanged.connect(self._crc_update)
+        self.crc_bg.buttonClicked.connect(self._crc_update)
+        return w
+
+    def _crc_update(self):
+        try:
+            text = self.crc_in.toPlainText()
+            mode = "hex" if self.crc_hex.isChecked() else "ascii"
+            data = text_to_bytes(
+                text, mode, self.config.get("default_encoding", "utf-8")
+            )
+            self.crc_out.setText(crc_hex(self.crc_algo.currentText(), data))
+        except Exception as e:
+            self.crc_out.setText(f"ERR:{e}")
+
+    # ================= 校验和 =================
+
+    def _checksum_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+
+        h = QHBoxLayout()
+        h.setSpacing(6)
+        self.cs_ascii = QRadioButton(tr("ascii"))
+        self.cs_hex = QRadioButton(tr("hex"))
+        self.cs_ascii.setChecked(True)
+        self.cs_bg = QButtonGroup(self)
+        self.cs_bg.addButton(self.cs_ascii)
+        self.cs_bg.addButton(self.cs_hex)
+        h.addWidget(self.cs_ascii)
+        h.addWidget(self.cs_hex)
+        h.addStretch()
+        layout.addLayout(h)
+
+        self.cs_in = QPlainTextEdit()
+        self.cs_in.setPlaceholderText(tr("input_data"))
+        layout.addWidget(self.cs_in, 1)
+
+        layout.addWidget(QLabel(tr("result")))
+        # 2x2 网格结果
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        self.cs_sum8 = QLabel("SUM8: 0")
+        self.cs_sum16 = QLabel("SUM16: 0")
+        self.cs_xor = QLabel("XOR: 0")
+        self.cs_lrc = QLabel("LRC: 0")
+        for lbl in (self.cs_sum8, self.cs_sum16, self.cs_xor, self.cs_lrc):
+            lbl.setWordWrap(True)
+        grid.addWidget(self.cs_sum8, 0, 0)
+        grid.addWidget(self.cs_sum16, 0, 1)
+        grid.addWidget(self.cs_xor, 1, 0)
+        grid.addWidget(self.cs_lrc, 1, 1)
+        layout.addLayout(grid)
+
+        layout.addStretch()
+
+        self.cs_in.textChanged.connect(self._cs_update)
+        self.cs_bg.buttonClicked.connect(self._cs_update)
+        return w
+
+    def _cs_update(self):
+        try:
+            text = self.cs_in.toPlainText()
+            mode = "hex" if self.cs_hex.isChecked() else "ascii"
+            data = text_to_bytes(
+                text, mode, self.config.get("default_encoding", "utf-8")
+            )
+            res = all_checksums(data)
+            self.cs_sum8.setText(f"SUM8: {res['SUM8']}")
+            self.cs_sum16.setText(f"SUM16: {res['SUM16']}")
+            self.cs_xor.setText(f"XOR: {res['XOR']}")
+            self.cs_lrc.setText(f"LRC: {res['LRC']}")
+        except Exception as e:
+            self.cs_sum8.setText(f"ERR:{e}")
+
+    # ================= 进制转换 =================
+
+    def _conv_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(8)
+
+        # --- 整数进制 ---
+        lbl1 = QLabel(tr("integer"))
+        lbl1.setObjectName("dim")
+        layout.addWidget(lbl1)
+
+        h1 = QHBoxLayout()
+        h1.setSpacing(4)
+        self.conv_int = QLineEdit("255")
+        self.conv_base = QComboBox()
+        self.conv_base.addItems(["DEC", "HEX", "BIN", "OCT"])
+        self.conv_base.setCurrentText("DEC")
+        self.conv_base.setMinimumWidth(70)
+        h1.addWidget(self.conv_int, 1)
+        h1.addWidget(self.conv_base)
+        layout.addLayout(h1)
+
+        self.conv_out = QLabel("")
+        self.conv_out.setWordWrap(True)
+        layout.addWidget(self.conv_out)
+
+        # --- 字符串 ↔ Hex ---
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setObjectName("dim")
+        layout.addWidget(sep1)
+
+        lbl2 = QLabel(tr("str_to_hex"))
+        lbl2.setObjectName("dim")
+        layout.addWidget(lbl2)
+
+        self.conv_str = QLineEdit("Hello")
+        layout.addWidget(self.conv_str)
+
+        h2 = QHBoxLayout()
+        h2.setSpacing(4)
+        self.conv_tohex = QPushButton(tr("str_to_hex"))
+        self.conv_tohex.setObjectName("ghost")
+        self.conv_fromhex = QPushButton(tr("hex_to_str"))
+        self.conv_fromhex.setObjectName("ghost")
+        h2.addWidget(self.conv_tohex, 1)
+        h2.addWidget(self.conv_fromhex, 1)
+        layout.addLayout(h2)
+
+        self.conv_strout = QLabel("")
+        self.conv_strout.setWordWrap(True)
+        layout.addWidget(self.conv_strout)
+
+        # --- 字节序交换 ---
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setObjectName("dim")
+        layout.addWidget(sep2)
+
+        lbl3 = QLabel(tr("swap_endian_btn"))
+        lbl3.setObjectName("dim")
+        layout.addWidget(lbl3)
+
+        self.conv_hexin = QLineEdit("01 02 03 04")
+        layout.addWidget(self.conv_hexin)
+
+        self.conv_swap = QPushButton(tr("swap_endian_btn"))
+        self.conv_swap.setObjectName("ghost")
+        layout.addWidget(self.conv_swap)
+
+        self.conv_swapout = QLabel("")
+        self.conv_swapout.setWordWrap(True)
+        layout.addWidget(self.conv_swapout)
+
+        layout.addStretch()
+
+        self.conv_int.textChanged.connect(self._conv_update)
+        self.conv_base.currentTextChanged.connect(self._conv_update)
+        self.conv_tohex.clicked.connect(self._str_to_hex)
+        self.conv_fromhex.clicked.connect(self._hex_to_str)
+        self.conv_swap.clicked.connect(self._swap)
+        self._conv_update()
+        return w
+
+    def _conv_update(self):
+        try:
+            v = int(self.conv_int.text(), 0) if self.conv_int.text() else 0
+            base = {"DEC": 10, "HEX": 16, "BIN": 2, "OCT": 8}[
+                self.conv_base.currentText()
+            ]
+            if base != 10:
+                v = int(self.conv_int.text(), base)
+            self.conv_out.setText(
+                f"DEC={int_to_base(v, 10)}  HEX={int_to_base(v, 16)}  BIN={int_to_base(v, 2)}  OCT={int_to_base(v, 8)}"
+            )
+        except Exception as e:
+            self.conv_out.setText(f"ERR:{e}")
+
+    def _str_to_hex(self):
+        self.conv_strout.setText(
+            str_to_hex(
+                self.conv_str.text(), self.config.get("default_encoding", "utf-8")
+            )
+        )
+
+    def _hex_to_str(self):
+        self.conv_strout.setText(
+            hex_to_str(
+                self.conv_hexin.text(), self.config.get("default_encoding", "utf-8")
+            )
+        )
+
+    def _swap(self):
+        try:
+            data = bytes.fromhex("".join(self.conv_hexin.text().split()))
+            self.conv_swapout.setText(swap_endian(data).hex(" ").upper())
+        except Exception as e:
+            self.conv_swapout.setText(f"ERR:{e}")
+
+    # ================= Hex 转文件 =================
+
+    def _hexfile_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+
+        self.hf_in = QPlainTextEdit()
+        self.hf_in.setPlaceholderText(tr("hex_to_file_input"))
+        layout.addWidget(self.hf_in, 1)
+
+        self.hf_save = QPushButton(tr("hex_to_file_save"))
+        self.hf_save.setObjectName("accent")
+        layout.addWidget(self.hf_save)
+
+        layout.addWidget(QLabel(tr("hex_to_file_preview")))
+        self.hf_preview = QLabel("")
+        self.hf_preview.setObjectName("dim")
+        self.hf_preview.setWordWrap(True)
+        layout.addWidget(self.hf_preview)
+
+        layout.addStretch()
+
+        self.hf_save.clicked.connect(self._hex_to_file)
+        self.hf_in.textChanged.connect(self._hex_preview)
+        return w
+
+    def _parse_hex_input(self) -> bytes | None:
+        text = self.hf_in.toPlainText().strip()
+        if not text:
+            return None
+        try:
+            cleaned = "".join(text.split())
+            return bytes.fromhex(cleaned)
+        except Exception:
+            return None
+
+    def _hex_preview(self):
+        data = self._parse_hex_input()
+        if data is None:
+            text = self.hf_in.toPlainText().strip()
+            if text:
+                self.hf_preview.setText(tr("hex_to_file_error").format(""))
+            else:
+                self.hf_preview.setText("")
+            return
+        preview = data[:256]
+        hex_str = preview.hex(" ").upper()
+        ascii_str = "".join(chr(b) if 32 <= b < 127 else "." for b in preview)
+        self.hf_preview.setText(f"{len(data)} bytes\n{hex_str}\n{ascii_str}")
+
+    def _hex_to_file(self):
+        data = self._parse_hex_input()
+        if data is None or len(data) == 0:
+            QMessageBox.warning(self, tr("error"), tr("hex_to_file_empty"))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("hex_to_file_save"), "", "All Files (*.*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            QMessageBox.information(
+                self, tr("notice"), tr("hex_to_file_ok").format(len(data), path)
+            )
+        except Exception as e:
+            QMessageBox.warning(self, tr("error"), tr("hex_to_file_error").format(e))
+
+    # ================= 自动回复（列表 + 详情） =================
+
+    def _autoreply_tab(self):
+        # 内容较长，包裹在 QScrollArea 中防止控件被挤压
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSpacing(6)
+
+        self.ar_enabled = QCheckBox(tr("enable_autoreply"))
+        layout.addWidget(self.ar_enabled)
+
+        # 操作按钮（两行各两个，均分宽度）
+        h1 = QHBoxLayout()
+        h1.setSpacing(4)
+        self.ar_add = QPushButton(tr("add"))
+        self.ar_add.setObjectName("ghost")
+        self.ar_del = QPushButton(tr("delete_selected"))
+        self.ar_del.setObjectName("ghost")
+        h1.addWidget(self.ar_add, 1)
+        h1.addWidget(self.ar_del, 1)
+        layout.addLayout(h1)
+
+        h2 = QHBoxLayout()
+        h2.setSpacing(4)
+        self.ar_imp = QPushButton(tr("import_btn"))
+        self.ar_imp.setObjectName("ghost")
+        self.ar_exp = QPushButton(tr("export_btn"))
+        self.ar_exp.setObjectName("ghost")
+        h2.addWidget(self.ar_imp, 1)
+        h2.addWidget(self.ar_exp, 1)
+        layout.addLayout(h2)
+
+        # 规则列表
+        self.ar_list = QListWidget()
+        self.ar_list.setMaximumHeight(120)
+        layout.addWidget(self.ar_list)
+
+        # 规则详情编辑区
+        detail = QGroupBox(tr("ar_rule_detail"))
+        form = QFormLayout(detail)
+        form.setSpacing(4)
+
+        self.ar_det_enabled = QCheckBox(tr("ar_enabled_short"))
+        form.addRow(self.ar_det_enabled)
+
+        self.ar_det_match = QComboBox()
+        self.ar_det_match.addItems(["exact", "contains", "prefix", "regex"])
+        form.addRow(tr("ar_match_type"), self.ar_det_match)
+
+        self.ar_det_mode = QComboBox()
+        self.ar_det_mode.addItems(["ascii", "hex"])
+        form.addRow(tr("ar_reply_mode"), self.ar_det_mode)
+
+        self.ar_det_pattern = QLineEdit()
+        form.addRow(tr("ar_pattern"), self.ar_det_pattern)
+
+        self.ar_det_reply = QLineEdit()
+        form.addRow(tr("ar_reply_content"), self.ar_det_reply)
+
+        self.ar_det_delay = QSpinBox()
+        self.ar_det_delay.setMaximum(999999)
+        form.addRow(tr("ar_delay_ms"), self.ar_det_delay)
+
+        self.ar_det_rate = QSpinBox()
+        self.ar_det_rate.setMaximum(999999)
+        form.addRow(tr("ar_rate_ms"), self.ar_det_rate)
+
+        layout.addWidget(detail)
+
+        # 信号连接
+        self.ar_enabled.toggled.connect(self._ar_apply)
+        self.ar_add.clicked.connect(self._ar_add)
+        self.ar_del.clicked.connect(self._ar_del)
+        self.ar_imp.clicked.connect(self._ar_import)
+        self.ar_exp.clicked.connect(self._ar_export)
+        self.ar_list.currentRowChanged.connect(self._ar_on_select)
+        # 详情表单修改时回写
+        self.ar_det_enabled.toggled.connect(self._ar_on_detail_changed)
+        self.ar_det_match.currentTextChanged.connect(self._ar_on_detail_changed)
+        self.ar_det_mode.currentTextChanged.connect(self._ar_on_detail_changed)
+        self.ar_det_pattern.textChanged.connect(self._ar_on_detail_changed)
+        self.ar_det_reply.textChanged.connect(self._ar_on_detail_changed)
+        self.ar_det_delay.valueChanged.connect(self._ar_on_detail_changed)
+        self.ar_det_rate.valueChanged.connect(self._ar_on_detail_changed)
+
+        self._ar_data = []  # 内部数据列表
+        self._ar_loading = False
+        self._ar_load()
+
+        scroll.setWidget(content)
+        return scroll
+
+    def _ar_load(self):
+        cfgs = self.config.get("autoreply_rules", [])
+        self._ar_data = [dict(r) for r in cfgs]
+        self._ar_refresh_list()
+
+    def _ar_refresh_list(self):
+        self._ar_loading = True
+        self.ar_list.clear()
+        for i, r in enumerate(self._ar_data):
+            enabled = r.get("enabled", True)
+            match = r.get("match", "contains")
+            pattern = r.get("pattern", "")
+            reply = r.get("reply", "")
+            mark = "\u2713" if enabled else "\u2717"
+            text = f"{mark} [{match}] {pattern} \u2192 {reply}"
+            item = QListWidgetItem(text)
+            self.ar_list.addItem(item)
+        self._ar_loading = False
+        if self._ar_data:
+            self.ar_list.setCurrentRow(0)
+        else:
+            self._ar_clear_detail()
+
+    def _ar_on_select(self, row):
+        if self._ar_loading:
+            return
+        if row < 0 or row >= len(self._ar_data):
+            self._ar_clear_detail()
+            return
+        r = self._ar_data[row]
+        self._ar_loading = True
+        self.ar_det_enabled.setChecked(r.get("enabled", True))
+        self.ar_det_match.setCurrentText(r.get("match", "contains"))
+        self.ar_det_mode.setCurrentText(r.get("reply_mode", "ascii"))
+        self.ar_det_pattern.setText(r.get("pattern", ""))
+        self.ar_det_reply.setText(r.get("reply", ""))
+        self.ar_det_delay.setValue(r.get("delay_ms", 0))
+        self.ar_det_rate.setValue(r.get("rate_limit_ms", 0))
+        self._ar_loading = False
+
+    def _ar_clear_detail(self):
+        self._ar_loading = True
+        self.ar_det_enabled.setChecked(True)
+        self.ar_det_match.setCurrentIndex(0)
+        self.ar_det_mode.setCurrentIndex(0)
+        self.ar_det_pattern.setText("")
+        self.ar_det_reply.setText("")
+        self.ar_det_delay.setValue(0)
+        self.ar_det_rate.setValue(0)
+        self._ar_loading = False
+
+    def _ar_on_detail_changed(self):
+        if self._ar_loading:
+            return
+        row = self.ar_list.currentRow()
+        if row < 0 or row >= len(self._ar_data):
+            return
+        r = self._ar_data[row]
+        r["enabled"] = self.ar_det_enabled.isChecked()
+        r["match"] = self.ar_det_match.currentText()
+        r["reply_mode"] = self.ar_det_mode.currentText()
+        r["pattern"] = self.ar_det_pattern.text()
+        r["reply"] = self.ar_det_reply.text()
+        r["delay_ms"] = self.ar_det_delay.value()
+        r["rate_limit_ms"] = self.ar_det_rate.value()
+        # 更新列表显示
+        enabled = r["enabled"]
+        mark = "\u2713" if enabled else "\u2717"
+        text = f"{mark} [{r['match']}] {r['pattern']} \u2192 {r['reply']}"
+        self.ar_list.item(row).setText(text)
+        self._ar_apply()
+
+    def _ar_apply(self):
+        self.config.set("autoreply_rules", self._ar_data)
+        if self.ar_enabled.isChecked():
+            self.autoreply.set_rules([ReplyRule(**r) for r in self._ar_data])
+        else:
+            self.autoreply.set_rules([])
+
+    def _ar_add(self):
+        self._ar_data.append(
+            {
+                "enabled": True,
+                "match": "contains",
+                "reply_mode": "ascii",
+                "pattern": "",
+                "reply": "",
+                "delay_ms": 0,
+                "rate_limit_ms": 0,
+            }
+        )
+        self._ar_refresh_list()
+        self.ar_list.setCurrentRow(len(self._ar_data) - 1)
+        self._ar_apply()
+
+    def _ar_del(self):
+        row = self.ar_list.currentRow()
+        if row >= 0 and row < len(self._ar_data):
+            del self._ar_data[row]
+            self._ar_refresh_list()
+            self._ar_apply()
+
+    def _ar_import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("import_rules"), "", "JSON (*.json)"
+        )
+        if path:
+            import json
+
+            with open(path, "r", encoding="utf-8") as f:
+                self._ar_data = json.load(f)
+            self._ar_refresh_list()
+            self._ar_apply()
+
+    def _ar_export(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export_rules"), "", "JSON (*.json)"
+        )
+        if path:
+            import json
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._ar_data, f, ensure_ascii=False, indent=2)
+
+    # ================= Modbus 报文构造器 =================
+
+    def _modbus_tab(self):
+        """Modbus 报文构造器：选择功能码/地址/值 → 构造帧 → 填充到发送区。"""
+        from ..plugins.modbus_tool.frame import (
+            build_rtu_request,
+            build_tcp_request,
+            make_read_pdu,
+            make_write_single_coil_pdu,
+            make_write_single_reg_pdu,
+            make_write_multiple_regs_pdu,
+            make_write_multiple_coils_pdu,
+        )
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+
+        # --- 功能码 ---
+        FUNC_CODES = [
+            ("0x01", tr("mb_read_coils"), 0x01),
+            ("0x02", tr("mb_read_discrete"), 0x02),
+            ("0x03", tr("mb_read_holding"), 0x03),
+            ("0x04", tr("mb_read_input"), 0x04),
+            ("0x05", tr("mb_write_single_coil"), 0x05),
+            ("0x06", tr("mb_write_holding"), 0x06),
+            ("0x0F", tr("mb_write_coils"), 0x0F),
+            ("0x10", tr("mb_write_multi_holding"), 0x10),
+        ]
+
+        # Slave ID + Format
+        sid_row = QHBoxLayout()
+        sid_row.setSpacing(4)
+        sid_lbl = QLabel(tr("mb_slave_id"))
+        sid_lbl.setObjectName("dim")
+        self.mb_sid = QSpinBox()
+        self.mb_sid.setRange(1, 247)
+        self.mb_sid.setValue(1)
+        self.mb_sid.setMaximumWidth(70)
+        sid_row.addWidget(sid_lbl)
+        sid_row.addWidget(self.mb_sid)
+        sid_row.addStretch()
+        mb_fmt_lbl = QLabel(tr("mb_format"))
+        mb_fmt_lbl.setObjectName("dim")
+        self.mb_fmt = QComboBox()
+        self.mb_fmt.addItem("RTU", "rtu")
+        self.mb_fmt.addItem("TCP", "tcp")
+        self.mb_fmt.setMinimumWidth(70)
+        sid_row.addWidget(mb_fmt_lbl)
+        sid_row.addWidget(self.mb_fmt)
+        layout.addLayout(sid_row)
+
+        # 功能码
+        fc_row = QHBoxLayout()
+        fc_row.setSpacing(4)
+        fc_lbl = QLabel(tr("function"))
+        fc_lbl.setObjectName("dim")
+        self.mb_fc = QComboBox()
+        for hex_str, name, code in FUNC_CODES:
+            self.mb_fc.addItem(f"{hex_str} {name}", code)
+        fc_row.addWidget(fc_lbl)
+        fc_row.addWidget(self.mb_fc, 1)
+        layout.addLayout(fc_row)
+
+        # 地址（支持十进制和 0x 十六进制）
+        addr_row = QHBoxLayout()
+        addr_row.setSpacing(4)
+        addr_lbl = QLabel(tr("address"))
+        addr_lbl.setObjectName("dim")
+        self.mb_addr = QLineEdit("0")
+        self.mb_addr.setMaximumWidth(100)
+        self.mb_addr.setPlaceholderText("dec 或 0x4000")
+        addr_row.addWidget(addr_lbl)
+        addr_row.addWidget(self.mb_addr)
+        addr_row.addStretch()
+        layout.addLayout(addr_row)
+
+        # 数量（读操作：0x01-0x04）
+        qty_wrap = QWidget()
+        qty_row = QHBoxLayout(qty_wrap)
+        qty_row.setContentsMargins(0, 0, 0, 0)
+        qty_row.setSpacing(4)
+        qty_lbl = QLabel(tr("mb_reg_count"))
+        qty_lbl.setObjectName("dim")
+        self.mb_qty = QSpinBox()
+        self.mb_qty.setRange(1, 2000)
+        self.mb_qty.setValue(1)
+        self.mb_qty.setMaximumWidth(100)
+        qty_row.addWidget(qty_lbl)
+        qty_row.addWidget(self.mb_qty)
+        qty_row.addStretch()
+        layout.addWidget(qty_wrap)
+        self._mb_qty_wrap = qty_wrap
+
+        # 写入值（写单个：0x05/0x06）
+        val_wrap = QWidget()
+        val_row = QHBoxLayout(val_wrap)
+        val_row.setContentsMargins(0, 0, 0, 0)
+        val_row.setSpacing(4)
+        val_lbl = QLabel(tr("mb_set_value"))
+        val_lbl.setObjectName("dim")
+        self.mb_val = QSpinBox()
+        self.mb_val.setRange(0, 65535)
+        self.mb_val.setMaximumWidth(100)
+        val_row.addWidget(val_lbl)
+        val_row.addWidget(self.mb_val)
+        val_row.addStretch()
+        layout.addWidget(val_wrap)
+        self._mb_val_wrap = val_wrap
+
+        # 线圈 ON（0x05 专用）
+        coil_wrap = QWidget()
+        coil_row = QHBoxLayout(coil_wrap)
+        coil_row.setContentsMargins(0, 0, 0, 0)
+        coil_row.setSpacing(4)
+        self.mb_coil_on = QCheckBox(tr("mb_write_coils"))
+        coil_row.addWidget(self.mb_coil_on)
+        coil_row.addStretch()
+        layout.addWidget(coil_wrap)
+        self._mb_coil_wrap = coil_wrap
+
+        # 批量写入值（0x0F/0x10）
+        multi_wrap = QWidget()
+        multi_row = QVBoxLayout(multi_wrap)
+        multi_row.setContentsMargins(0, 0, 0, 0)
+        multi_row.setSpacing(4)
+        multi_lbl = QLabel(tr("mb_write_values"))
+        multi_lbl.setObjectName("dim")
+        self.mb_multi_vals = QLineEdit()
+        self.mb_multi_vals.setPlaceholderText("1 2 3 或 0x0001,0x0002")
+        multi_row.addWidget(multi_lbl)
+        multi_row.addWidget(self.mb_multi_vals)
+        layout.addWidget(multi_wrap)
+        self._mb_multi_wrap = multi_wrap
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        self.mb_build = QPushButton(tr("mb_build_frame"))
+        self.mb_build.setObjectName("accent")
+        self.mb_fill = QPushButton(tr("mb_fill_tx"))
+        self.mb_fill.setObjectName("ghost")
+        btn_row.addWidget(self.mb_build, 1)
+        btn_row.addWidget(self.mb_fill, 1)
+        layout.addLayout(btn_row)
+
+        # 预览
+        lbl = QLabel(tr("mb_frame_preview"))
+        lbl.setObjectName("dim")
+        layout.addWidget(lbl)
+        self.mb_preview = QLineEdit()
+        self.mb_preview.setReadOnly(True)
+        self.mb_preview.setPlaceholderText("01 03 00 00 00 01 84 0A")
+        layout.addWidget(self.mb_preview)
+
+        layout.addStretch()
+
+        # 信号
+        self.mb_fc.currentIndexChanged.connect(self._mb_on_fc_change)
+        self.mb_build.clicked.connect(self._mb_do_build)
+        self.mb_fill.clicked.connect(self._mb_do_fill)
+        self._mb_on_fc_change()
+        return w
+
+    def _mb_on_fc_change(self):
+        """根据功能码切换显示字段。"""
+        fc = self.mb_fc.currentData()
+        self._mb_qty_wrap.setVisible(fc in (0x01, 0x02, 0x03, 0x04))
+        self._mb_val_wrap.setVisible(fc in (0x05, 0x06))
+        self._mb_coil_wrap.setVisible(fc == 0x05)
+        self._mb_multi_wrap.setVisible(fc in (0x0F, 0x10))
+
+    def _mb_do_build(self):
+        """构造 Modbus 报文并显示预览。"""
+        try:
+            sid = self.mb_sid.value()
+            fc = self.mb_fc.currentData()
+            addr = _parse_int(self.mb_addr.text())
+            fmt = self.mb_fmt.currentData()
+
+            from ..plugins.modbus_tool.frame import (
+                build_rtu_request,
+                build_tcp_request,
+                make_read_pdu,
+                make_write_single_coil_pdu,
+                make_write_single_reg_pdu,
+                make_write_multiple_regs_pdu,
+                make_write_multiple_coils_pdu,
+            )
+
+            # 构建 PDU
+            if fc in (0x01, 0x02, 0x03, 0x04):
+                pdu = make_read_pdu(fc, addr, self.mb_qty.value())
+            elif fc == 0x05:
+                pdu = make_write_single_coil_pdu(addr, self.mb_coil_on.isChecked())
+            elif fc == 0x06:
+                pdu = make_write_single_reg_pdu(addr, self.mb_val.value())
+            elif fc == 0x0F:
+                vals = self._mb_parse_multi()
+                pdu = make_write_multiple_coils_pdu(addr, vals)
+            elif fc == 0x10:
+                vals = self._mb_parse_multi()
+            else:
+                self.mb_preview.setText("ERR: 未知功能码")
+                return
+
+            # 包装帧头
+            if fmt == "tcp":
+                frame = build_tcp_request(sid, fc, pdu)
+            else:
+                frame = build_rtu_request(sid, fc, pdu)
+
+            self.mb_preview.setText(frame.hex(" ").upper())
+        except Exception as e:
+            self.mb_preview.setText(f"ERR: {e}")
+
+    def _mb_do_fill(self):
+        """将预览报文填充到发送区。"""
+        text = self.mb_preview.text().strip()
+        if not text or text.startswith("ERR"):
+            return
+        if self.main_window:
+            self.main_window.fill_send_text(text)
+
+    def _mb_parse_multi(self) -> list:
+        """解析批量值输入为整数列表。"""
+        text = self.mb_multi_vals.text().strip()
+        if not text:
+            return []
+        text = text.replace(",", " ")
+        vals = []
+        for part in text.split():
+            part = part.strip()
+            if not part:
+                continue
+            if part.lower().startswith("0x"):
+                vals.append(int(part, 16))
+            else:
+                vals.append(int(part))
+        return vals

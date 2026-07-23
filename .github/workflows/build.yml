@@ -1,0 +1,150 @@
+name: Build & Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. v0.1.0)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Windows
+            runner: windows-latest
+            arch: x64
+            ext: .exe
+            python: "3.12"
+          - os: Linux
+            runner: ubuntu-latest
+            arch: x64
+            ext: ""
+            python: "3.12"
+          - os: macOS
+            runner: macos-13
+            arch: x64
+            ext: ""
+            python: "3.12"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libxkbcommon0 libgl1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            # 从 Release tag 提取版本号
+            VER="${{ github.event.release.tag_name }}"
+          else
+            # 手动触发时使用输入值
+            VER="${{ inputs.version }}"
+          fi
+          echo "value=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller `
+            --name SerialNetTool `
+            --onefile `
+            --clean `
+            --noconfirm `
+            --hidden-import PySide6.QtCore `
+            --hidden-import PySide6.QtGui `
+            --hidden-import PySide6.QtWidgets `
+            --hidden-import paho.mqtt.client `
+            --hidden-import serial `
+            --hidden-import crcmod `
+            --hidden-import serial_net_tool.plugins.modbus_tool `
+            main.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Build (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          pyinstaller \
+            --name SerialNetTool \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtGui \
+            --hidden-import PySide6.QtWidgets \
+            --hidden-import paho.mqtt.client \
+            --hidden-import serial \
+            --hidden-import crcmod \
+            --hidden-import serial_net_tool.plugins.modbus_tool \
+            main.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Verify build output
+        shell: bash
+        run: ls -lh dist/
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          V="${{ steps.version.outputs.value }}"
+          OS="${{ matrix.os }}"
+          A="${{ matrix.arch }}"
+          E="${{ matrix.ext }}"
+          SRC="dist/SerialNetTool${E}"
+          DST="dist/SerialNetTool-v${V}-${OS,,}-${A}${E}"
+          mv "$SRC" "$DST"
+          echo "ARTIFACT=$DST" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SerialNetTool-${{ steps.version.outputs.value }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ env.ARTIFACT }}
+          if-no-files-found: error
+
+  release:
+    name: Attach to Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
