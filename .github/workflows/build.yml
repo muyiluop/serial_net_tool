@@ -71,8 +71,11 @@ jobs:
           pyinstaller `
             --name SerialNetTool `
             --onefile `
+            --windowed `
             --clean `
             --noconfirm `
+            --icon resources/icon.ico `
+            --add-data "resources/icon.ico;resources" `
             --hidden-import PySide6.QtCore `
             --hidden-import PySide6.QtGui `
             --hidden-import PySide6.QtWidgets `
@@ -80,12 +83,13 @@ jobs:
             --hidden-import serial `
             --hidden-import crcmod `
             --hidden-import serial_net_tool.plugins.modbus_tool `
-            main.py
+            --collect-submodules serial_net_tool `
+            launch.py
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Build (Linux / macOS)
-        if: runner.os != 'Windows'
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           pyinstaller \
@@ -93,6 +97,8 @@ jobs:
             --onefile \
             --clean \
             --noconfirm \
+            --icon resources/icon.ico \
+            --add-data "resources/icon.ico:resources" \
             --hidden-import PySide6.QtCore \
             --hidden-import PySide6.QtGui \
             --hidden-import PySide6.QtWidgets \
@@ -100,7 +106,8 @@ jobs:
             --hidden-import serial \
             --hidden-import crcmod \
             --hidden-import serial_net_tool.plugins.modbus_tool \
-            main.py
+            --collect-submodules serial_net_tool \
+            launch.py
         env:
           PYTHONIOENCODING: utf-8
 
