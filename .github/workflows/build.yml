@@ -28,11 +28,6 @@ jobs:
             arch: x64
             ext: ""
             python: "3.12"
-          - os: macOS
-            runner: macos-13
-            arch: x64
-            ext: ""
-            python: "3.12"
 
     steps:
       - name: Checkout
