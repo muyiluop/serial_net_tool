@@ -4,11 +4,16 @@
 依赖：Pillow（仅生成期使用，不进入运行期依赖）。
 
 用法：
-    python tools/gen_icon.py            # 输出到 resources/
-    python tools/gen_icon.py --out DIR  # 输出到指定目录
+    python tools/gen_icon.py                 # 输出到 resources/
+    python tools/gen_icon.py --out DIR       # 输出到指定目录
+    python tools/gen_icon.py --preview       # 额外输出 icon_*.png 便于核对
 
-设计：深色圆角底 + 左侧串口连接器（浅灰）+ 右侧递增信号柱（青绿强调色）。
-所有形状按 4 倍超采样绘制后下采样，保证小尺寸边缘平滑。
+Logo 设计（A 双向数据流）：
+- 深色圆角底（与深色主题一致，自上而下微渐变）；
+- 上方青绿箭头右向、下方浅灰箭头左向，构成"双向收发"语义；
+- 两条箭头上下对称、左右对齐，小尺寸（16px）下仍可一眼辨认。
+
+所有形状按 4 倍超采样绘制后下采样；小尺寸会略微加粗笔画以保证可读性。
 """
 import argparse
 import os
@@ -16,20 +21,26 @@ import os
 from PIL import Image, ImageDraw
 
 # 与 core/theme.py 的深色主题令牌保持一致
-BG_TOP = (32, 33, 36, 255)      # #202124
-BG_BOTTOM = (23, 24, 26, 255)   # #17181a
-PLUG = (215, 217, 221, 255)     # #d7d9dd
-ACCENT = (45, 212, 191, 255)    # #2dd4bf
-ACCENT_DIM = (20, 184, 166, 255)
+BG_TOP = (34, 36, 40, 255)      # #222428
+BG_BOTTOM = (22, 23, 26, 255)   # #16171a
+ACCENT = (45, 212, 191, 255)    # #2dd4bf 主箭头（青绿）
+LIGHT = (222, 226, 230, 255)    # #dee2e6 次箭头（浅灰）
 
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
-ICNS_SIZES = [16, 32, 64, 128, 256, 512, 1024]
 SS = 4  # 超采样倍数
+
+# 图形几何（64 单位设计稿）
+_GRID = 64.0
+_ARROW_X0, _ARROW_X1 = 13.0, 51.0   # 箭头水平范围（左右对齐）
+_ARROW_Y_TOP, _ARROW_Y_BOTTOM = 23.0, 41.0
+_HEAD_LEN = 9.0                      # 箭头头部长度
+_HEAD_HALF = 7.0                     # 箭头头部半高
+_SHAFT_W = 6.5                       # 箭杆宽度
 
 
 def _rounded_bg(size: int) -> Image.Image:
     """圆角方形背景（自上而下微渐变）。"""
-    bg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     grad = Image.new("RGBA", (1, size))
     for y in range(size):
         t = y / max(1, size - 1)
@@ -41,36 +52,44 @@ def _rounded_bg(size: int) -> Image.Image:
     ImageDraw.Draw(mask).rounded_rectangle(
         [0, 0, size - 1, size - 1], radius=int(size * 0.22), fill=255
     )
-    bg.paste(grad, (0, 0), mask)
-    return bg
+    img.paste(grad, (0, 0), mask)
+    return img
 
 
 def draw_icon(size: int) -> Image.Image:
-    """按目标尺寸绘制图标（内部 4 倍超采样后下采样）。"""
+    """按目标尺寸绘制图标（内部超采样后下采样）。"""
     s = size * SS
-    img = _rounded_bg(s)
-    d = ImageDraw.Draw(img)
 
     def u(v: float) -> int:
         """按 64 单位设计稿换算到当前画布。"""
-        return int(round(v / 64.0 * s))
+        return int(round(v / _GRID * s))
 
-    # ---- 左侧：串口连接器（圆角体 + 两根插针）----
-    d.rounded_rectangle(
-        [u(11), u(24), u(28), u(40)], radius=u(3), fill=PLUG
-    )
-    d.rounded_rectangle([u(28), u(29), u(36), u(32)], radius=u(1.2), fill=PLUG)
-    d.rounded_rectangle([u(28), u(34), u(36), u(37)], radius=u(1.2), fill=PLUG)
+    img = _rounded_bg(s)
+    d = ImageDraw.Draw(img)
 
-    # ---- 连线（连接器 → 信号柱）----
-    d.line([u(34), u(33), u(40), u(33)], fill=ACCENT_DIM, width=max(1, u(1.6)))
+    # 小尺寸略微加粗，抵消下采样带来的笔画变细
+    boost = 1.12 if size <= 20 else 1.0
+    shaft = max(1, int(round(u(_SHAFT_W) * boost)))
+    half = u(_HEAD_HALF) * (boost if size <= 20 else 1.0)
+    head = u(_HEAD_LEN)
 
-    # ---- 右侧：递增信号柱 ----
-    bars = [(44, 40, 20), (49, 40, 13), (54, 40, 6)]  # (x, bottom, top)
-    for x, bottom, top in bars:
-        d.rounded_rectangle(
-            [u(x), u(top), u(x + 4), u(bottom)], radius=u(1.6), fill=ACCENT
-        )
+    def arrow(y: float, to_right: bool, color):
+        y = u(y)
+        if to_right:
+            x_tail, x_head = u(_ARROW_X0), u(_ARROW_X1) - head
+            tip = u(_ARROW_X1)
+        else:
+            x_tail, x_head = u(_ARROW_X1), u(_ARROW_X0) + head
+            tip = u(_ARROW_X0)
+        d.line([x_tail, y, x_head, y], fill=color, width=shaft)
+        # 圆头尾端
+        r = shaft / 2.0
+        d.ellipse([x_tail - r, y - r, x_tail + r, y + r], fill=color)
+        # 三角形箭头
+        d.polygon([(tip, y), (x_head, y - half), (x_head, y + half)], fill=color)
+
+    arrow(_ARROW_Y_TOP, True, ACCENT)     # 上：发送（右向）
+    arrow(_ARROW_Y_BOTTOM, False, LIGHT)  # 下：接收（左向）
 
     return img.resize((size, size), Image.LANCZOS)
 
@@ -101,8 +120,7 @@ def main():
     # macOS .icns
     icns_path = os.path.join(args.out, "icon.icns")
     try:
-        big = draw_icon(1024)
-        big.save(icns_path, format="ICNS")
+        draw_icon(1024).save(icns_path, format="ICNS")
         print(f"  {icns_path}  (from 1024px)")
     except Exception as e:  # icns 写入失败不影响 Windows 构建
         print(f"  skip icns: {e}")
@@ -116,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -50,12 +50,10 @@ jobs:
           - os: Windows
             runner: windows-latest
             arch: x64
-            ext: .exe
             python: "3.12"
           - os: Linux
             runner: ubuntu-latest
             arch: x64
-            ext: ""
             python: "3.12"
 
     steps:
@@ -78,7 +76,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements-build.txt
 
       - name: Determine version
         id: version
@@ -93,50 +91,11 @@ jobs:
           fi
           echo "value=$VER" >> "$GITHUB_OUTPUT"
 
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          pyinstaller `
-            --name SerialNetTool `
-            --onefile `
-            --windowed `
-            --clean `
-            --noconfirm `
-            --icon resources/icon.ico `
-            --add-data "resources/icon.ico;resources" `
-            --hidden-import PySide6.QtCore `
-            --hidden-import PySide6.QtGui `
-            --hidden-import PySide6.QtWidgets `
-            --hidden-import paho.mqtt.client `
-            --hidden-import serial `
-            --collect-submodules serial_net_tool `
-            --add-data "plugins/reverse/plugin.json;serial_net_tool/plugins/reverse" `
-            --add-data "plugins/codec_tool/plugin.json;serial_net_tool/plugins/codec_tool" `
-            launch.py
-        env:
-          PYTHONIOENCODING: utf-8
-
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
+      # 打包逻辑统一在 tools/build.py，本地用同一条命令：
+      #   python tools/build.py --version vX.Y.Z
+      - name: Build package
         shell: bash
-        run: |
-          pyinstaller \
-            --name SerialNetTool \
-            --onefile \
-            --clean \
-            --noconfirm \
-            --icon resources/icon.ico \
-            --add-data "resources/icon.ico:resources" \
-            --hidden-import PySide6.QtCore \
-            --hidden-import PySide6.QtGui \
-            --hidden-import PySide6.QtWidgets \
-            --hidden-import paho.mqtt.client \
-            --hidden-import serial \
-            --collect-submodules serial_net_tool \
-            --add-data "plugins/reverse/plugin.json:serial_net_tool/plugins/reverse" \
-            --add-data "plugins/codec_tool/plugin.json:serial_net_tool/plugins/codec_tool" \
-            launch.py
+        run: python tools/build.py --version "${{ steps.version.outputs.value }}"
         env:
           PYTHONIOENCODING: utf-8
 
@@ -144,23 +103,19 @@ jobs:
         shell: bash
         run: ls -lh dist/
 
-      - name: Rename artifact
+      - name: Resolve artifact path
+        id: artifact
         shell: bash
         run: |
-          V="${{ steps.version.outputs.value }}"
-          OS="${{ matrix.os }}"
-          A="${{ matrix.arch }}"
-          E="${{ matrix.ext }}"
-          SRC="dist/SerialNetTool${E}"
-          DST="dist/SerialNetTool-v${V}-${OS,,}-${A}${E}"
-          mv "$SRC" "$DST"
-          echo "ARTIFACT=$DST" >> "$GITHUB_ENV"
+          F=$(ls dist/SerialNetTool-* | head -n 1)
+          echo "path=$F" >> "$GITHUB_OUTPUT"
+          echo "artifact=$F"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: SerialNetTool-${{ steps.version.outputs.value }}-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ env.ARTIFACT }}
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
 
   release:

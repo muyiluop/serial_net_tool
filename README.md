@@ -45,6 +45,34 @@ pip install -r requirements-dev.txt
 python -m pytest          # 无头运行，覆盖纯逻辑模块与界面冒烟
 ```
 
+## 打包
+
+打包参数统一收敛在 `tools/build.py`，**本地与 CI 使用同一条命令**（CI 见 `.github/workflows/build.yml`）：
+
+```bash
+pip install -r requirements-build.txt     # PyInstaller + Pillow
+python tools/build.py                     # 单文件、无控制台窗口
+python tools/build.py --console           # 保留控制台（便于排错）
+python tools/build.py --onedir            # 目录形式（启动更快）
+python tools/build.py --gen-icon          # 先重绘图标再打包
+python tools/build.py --version v0.3.0 --zip   # 带版本号命名并压缩分发
+python tools/build.py --dry-run           # 只打印将执行的命令
+```
+
+产物输出到 `dist/`，可执行文件图标取自 `resources/icon.ico`。
+
+## 应用图标
+
+图标由 `tools/gen_icon.py` 绘制并输出多尺寸资源（Windows `.ico` 含 16/24/32/48/64/128/256，
+macOS `.icns` 由 1024px 生成）：
+
+```bash
+python tools/gen_icon.py            # 生成到 resources/
+python tools/gen_icon.py --preview  # 额外输出 icon_*.png 便于核对
+```
+
+设计：深色圆角底 + 青绿/浅灰双向箭头，见脚本头部说明。
+
 ## 模块结构
 
 ```
