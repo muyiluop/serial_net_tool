@@ -44,7 +44,7 @@ TRANSLATIONS = {
         "plugin_manager": "插件管理",
         "tools_panel": "工具面板",
         # ---- 会话管理 ----
-        "add_session": "＋ 新建",
+        "add_session": "新建",
         "new_session_title": "新建会话",
         "type": "类型",
         "name": "名称",
@@ -375,7 +375,7 @@ TRANSLATIONS = {
         "plugin_manager": "Plugins",
         "tools_panel": "Tools Panel",
         # ---- session management ----
-        "add_session": "＋ New",
+        "add_session": "New",
         "new_session_title": "New Session",
         "type": "Type",
         "name": "Name",
