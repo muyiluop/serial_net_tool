@@ -29,7 +29,13 @@ def main():
     apply_theme(app, config.get("theme", "dark"))
 
     autoreply = AutoReplyEngine()
-    autoreply.set_rules([ReplyRule(**r) for r in config.get("autoreply_rules", [])])
+    rules = []
+    for raw in config.get("autoreply_rules", []):
+        try:
+            rules.append(ReplyRule.from_dict(raw, strict=True))
+        except Exception as e:  # 忽略损坏的历史规则，不阻塞启动
+            print(f"[AutoReply] skip invalid rule: {e}")
+    autoreply.set_rules(rules)
 
     plugins = PluginManager(config)
     plugins.discover()
@@ -41,6 +47,18 @@ def main():
 
     win = MainWindow(config, autoreply, plugins)
     win.show()
+
+    # 跟随系统主题：操作系统深浅色变化时自动重绘
+    def _on_color_scheme_changed(*_args):
+        if config.get("theme") == "system":
+            apply_theme(app, "system")
+            win.refresh_theme()
+
+    try:
+        app.styleHints().colorSchemeChanged.connect(_on_color_scheme_changed)
+    except Exception:
+        pass
+
     sys.exit(app.exec())
 
 

@@ -62,3 +62,31 @@ def crc_hex(name: str, data: bytes) -> str:
     val = crc(name, data)
     width = _width_of(name)
     return format(val, f"0{width // 4}x").upper()
+
+
+def crc_custom(
+    data: bytes,
+    width: int,
+    poly: int,
+    init: int,
+    refin: bool,
+    refout: bool,
+    xorout: int,
+) -> int:
+    """任意参数 CRC 计算（参数由调用方提供）。"""
+    return crc_generic(data, int(width), int(poly), int(init),
+                       bool(refin), bool(refout), int(xorout))
+
+
+def crc_hex_custom(
+    data: bytes,
+    width: int,
+    poly: int,
+    init: int,
+    refin: bool,
+    refout: bool,
+    xorout: int,
+) -> str:
+    """任意参数 CRC，按位宽输出定长大写十六进制。"""
+    val = crc_custom(data, width, poly, init, refin, refout, xorout)
+    return format(val, f"0{int(width) // 4}X")

@@ -1,0 +1,9 @@
+{
+  "id": "reverse",
+  "name": "字节反转 (Reverse)",
+  "version": "1.0",
+  "author": "SerialNetTool",
+  "description": "字节序 / 位序变换的小工具（dock 型示例插件）",
+  "tool_type": "dock",
+  "entry": "create_widget"
+}

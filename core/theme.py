@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QIcon, QPixmap, QPainter
 
 _CURRENT = "dark"
 _RESOLVED = "dark"  # system 解析后的实际值
@@ -41,6 +41,31 @@ _LIGHT_STATUS = {
     "CONNECTING": "#9a6700",
     "DISCONNECTED": "#6b7280",
 }
+
+
+# ---------------------------------------------------------------------------
+# 状态圆点图标：会话列表中用彩色圆点直观标识连接状态（按主题取色，缓存复用）。
+# ---------------------------------------------------------------------------
+_DOT_CACHE: dict = {}
+
+
+def status_icon(status_name: str) -> QIcon:
+    """返回表示连接状态的彩色圆点 QIcon（按主题着色）。"""
+    colors = status_colors()
+    color = colors.get(status_name, colors["DISCONNECTED"])
+    if color in _DOT_CACHE:
+        return _DOT_CACHE[color]
+    pm = QPixmap(14, 14)
+    pm.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setBrush(QColor(color))
+    painter.setPen(QColor(color))
+    painter.drawEllipse(3, 3, 8, 8)
+    painter.end()
+    icon = QIcon(pm)
+    _DOT_CACHE[color] = icon
+    return icon
 
 
 def _detect_system_theme() -> str:
@@ -147,6 +172,7 @@ def _tokens(dark: bool) -> dict:
             panel_alt="#2d2d30",
             border="#3c3c3c",
             border_soft="#333333",
+            sep="#3a3a3a",
             # 文字层
             text="#d4d4d4",
             text_dim="#9a9a9a",
@@ -189,6 +215,7 @@ def _tokens(dark: bool) -> dict:
         panel_alt="#f0f0f0",
         border="#d1d5db",
         border_soft="#e5e7eb",
+        sep="#e2e2e2",
         # 文字层
         text="#1f2937",
         text_dim="#6b7280",
@@ -390,6 +417,8 @@ def _qss(dark: bool) -> str:
         border-radius: {t["r_md"]};
     }}
     QFrame#collapsible_header:hover {{ border-color: {t["accent"]}; background-color: {t["sel_hover"]}; }}
+    QFrame#accent_bar {{ background-color: {t["accent"]}; border: none; border-radius: 1px; }}
+    QLabel#arrow {{ color: {t["text_dim"]}; font-size: 13px; }}
 
     /* ---------- 输入控件 ---------- */
     QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QComboBox {{
@@ -568,17 +597,25 @@ def _qss(dark: bool) -> str:
 
     /* Dock 工具面板紧凑 Tab */
     QTabWidget#dock_tabs QTabBar::tab {{
-        padding: 6px 10px;
-        margin: 4px 1px 0px 1px;
+        padding: 4px 9px;
+        font-size: 12px;
+        margin: 3px 1px 0px 1px;
     }}
+    QTabWidget#dock_tabs::pane {{ padding: 6px; }}
 
     /* ---------- 状态徽标/标签 ---------- */
     QLabel {{ color: {t["text"]}; background: transparent; min-height: 18px; }}
     QLabel#dim {{ color: {t["text_dim"]}; }}
-    QLabel#h1 {{ font-size: 15px; font-weight: 700; }}
-    QLabel#badge_ok {{ color: {t["ok"]}; font-weight: 600; }}
-    QLabel#badge_err {{ color: {t["err"]}; font-weight: 600; }}
-    QLabel#badge_warn {{ color: {t["warn"]}; font-weight: 600; }}
+    QLabel#h1 {{ font-size: 15px; font-weight: 600; }}
+    /* 连接状态胶囊徽标 */
+    QLabel#badge_ok, QLabel#badge_err, QLabel#badge_warn, QLabel#badge_idle {{
+        border-radius: 9px; padding: 1px 8px; font-size: 12px;
+        background-color: {t["panel_alt"]};
+    }}
+    QLabel#badge_ok {{ color: {t["ok"]}; border: 1px solid {t["ok"]}; font-weight: 600; }}
+    QLabel#badge_err {{ color: {t["err"]}; border: 1px solid {t["err"]}; font-weight: 600; }}
+    QLabel#badge_warn {{ color: {t["warn"]}; border: 1px solid {t["warn"]}; font-weight: 600; }}
+    QLabel#badge_idle {{ color: {t["text_dim"]}; border: 1px solid {t["border"]}; }}
     QLabel#status_ok {{ color: {t["ok"]}; font-weight: 600; }}
     QLabel#status_err {{ color: {t["err"]}; font-weight: 600; }}
     QLabel#stat {{ color: {t["text_dim"]}; font-family: Consolas, monospace; font-size: 12px; }}
@@ -611,6 +648,65 @@ def _qss(dark: bool) -> str:
     QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
         background: transparent;
     }}
+    /* ---------- 等宽文本（日志/发送框/结果） ---------- */
+    QPlainTextEdit#mono, QTextEdit#mono, QLineEdit#mono {{
+        font-family: Consolas, "Courier New", "Cascadia Mono", monospace;
+        font-size: 12.5px;
+    }}
+    QPlainTextEdit, QTextEdit {{
+        selection-background-color: {t["sel"]};
+        selection-color: {t["text_inv"]};
+    }}
+
+    /* ---------- 分隔线 ---------- */
+    QFrame#hsep {{ background-color: {t["sep"]}; border: none; max-height: 1px; }}
+    QFrame#vline {{ background-color: {t["sep"]}; border: none; max-width: 1px; }}
+
+    /* ---------- 危险按钮 ---------- */
+    QPushButton#danger {{ background-color: transparent; color: {t["err"]}; border: 1px solid {t["border"]}; }}
+    QPushButton#danger:hover {{ background-color: {t["err"]}; color: {t["text_inv"]}; border-color: {t["err"]}; }}
+
+    /* ---------- 工具按钮（即时切换，如暂停） ---------- */
+    QToolButton {{
+        background: transparent; color: {t["text"]};
+        border: 1px solid {t["border"]}; border-radius: {t["r_md"]};
+        padding: 5px 10px;
+    }}
+    QToolButton:hover {{ background: {t["sel_hover"]}; border-color: {t["accent"]}; }}
+    QToolButton:checked {{ background: {t["accent"]}; color: {t["accent_text"]}; border-color: {t["accent"]}; font-weight: 600; }}
+    QToolButton:disabled {{ color: {t["text_dim"]}; border-color: {t["border_soft"]}; }}
+
+    /* ---------- 滚动区域 ---------- */
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background: transparent; }}
+
+    /* ---------- 表格细节 ---------- */
+    QTableWidget::item, QTreeWidget::item, QListWidget::item {{ padding: 5px 6px; }}
+    QTableCornerButton::section {{ background-color: {t["panel_alt"]}; border: none; }}
+    QHeaderView::section:hover {{ background-color: {t["sel_hover"]}; }}
+
+    /* ---------- 菜单分隔 ---------- */
+    QMenu::separator {{ height: 1px; background: {t["border"]}; margin: 4px 8px; }}
+
+    /* ---------- 分割条反馈 ---------- */
+    QSplitter::handle:hover {{ background: {t["accent"]}; }}
+
+    /* ---------- Dock 按钮 ---------- */
+    QDockWidget::close-button, QDockWidget::float-button {{
+        background: transparent; border: none; padding: 2px;
+    }}
+    QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
+        background: {t["sel_hover"]}; border-radius: 4px;
+    }}
+
+    /* ---------- 进度条 ---------- */
+    QProgressBar {{
+        background-color: {t["panel_alt"]}; color: {t["text"]};
+        border: 1px solid {t["border"]}; border-radius: {t["r_md"]};
+        text-align: center; height: 14px; font-size: 11px;
+    }}
+    QProgressBar::chunk {{ background-color: {t["accent"]}; border-radius: {t["r_sm"]}; }}
+
     QToolTip {{
         background-color: {t["panel"]}; color: {t["text"]};
         border: 1px solid {t["border"]}; padding: 4px 6px;

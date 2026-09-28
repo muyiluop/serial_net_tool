@@ -11,6 +11,35 @@ on:
         type: string
 
 jobs:
+  test:
+    name: Test (Linux, offscreen)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libxkbcommon0 libgl1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
   build:
     name: ${{ matrix.os }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -81,9 +110,9 @@ jobs:
             --hidden-import PySide6.QtWidgets `
             --hidden-import paho.mqtt.client `
             --hidden-import serial `
-            --hidden-import crcmod `
-            --hidden-import serial_net_tool.plugins.modbus_tool `
             --collect-submodules serial_net_tool `
+            --add-data "plugins/reverse/plugin.json;serial_net_tool/plugins/reverse" `
+            --add-data "plugins/codec_tool/plugin.json;serial_net_tool/plugins/codec_tool" `
             launch.py
         env:
           PYTHONIOENCODING: utf-8
@@ -104,9 +133,9 @@ jobs:
             --hidden-import PySide6.QtWidgets \
             --hidden-import paho.mqtt.client \
             --hidden-import serial \
-            --hidden-import crcmod \
-            --hidden-import serial_net_tool.plugins.modbus_tool \
             --collect-submodules serial_net_tool \
+            --add-data "plugins/reverse/plugin.json:serial_net_tool/plugins/reverse" \
+            --add-data "plugins/codec_tool/plugin.json:serial_net_tool/plugins/codec_tool" \
             launch.py
         env:
           PYTHONIOENCODING: utf-8

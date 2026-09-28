@@ -10,7 +10,6 @@ from .channel import Channel, ChannelStatus
 from .packet_reassembler import PacketReassembler
 from .i18n import tr
 
-
 def _new_socket(udp: bool = False) -> socket.socket:
     return socket.socket(
         socket.AF_INET, socket.SOCK_DGRAM if udp else socket.SOCK_STREAM
@@ -64,11 +63,12 @@ class TcpClientChannel(Channel):
             return
         self.status = ChannelStatus.CONNECTED
         # 粘包重组
+        self._peer = f"{host}:{port}"
         self._reassembler = _make_reassembler(cfg)
         self._idle_timer = QTimer(self)
         self._idle_timer.timeout.connect(self._check_idle)
         self._idle_timer.start(20)
-        self._reader = _ReaderThread(sock, f"{host}:{port}", self)
+        self._reader = _ReaderThread(sock, self._peer, self)
         self._reader.data_received.connect(self._on_data)
         self._reader.closed.connect(lambda _: self._on_closed())
         self._reader.start()
@@ -80,12 +80,12 @@ class TcpClientChannel(Channel):
 
     def _check_idle(self):
         for frame in self._reassembler.check_idle():
-            self.emit_received(frame, {"dir": "in"})
+            self.emit_received(frame, {"dir": "in", "peer": self._peer})
 
     def _on_closed(self):
         # flush 残留
         for frame in self._reassembler.flush():
-            self.emit_received(frame, {"dir": "in"})
+            self.emit_received(frame, {"dir": "in", "peer": self._peer})
         self.status = ChannelStatus.DISCONNECTED
         self.emit_log("WARN", tr("tcp_peer_closed"))
 
@@ -106,6 +106,9 @@ class TcpClientChannel(Channel):
 
 
 class TcpServerChannel(Channel):
+    # 已连接客户端列表变化（供 UI 选择发送目标）
+    peers_changed = Signal(list)
+
     def open(self, cfg: dict):
         self.status = ChannelStatus.CONNECTING
         port = int(cfg["port"])
@@ -147,6 +150,11 @@ class TcpServerChannel(Channel):
         # 每个客户端一个重组器
         self._reassemblers[tag] = _make_reassembler(self._cfg)
         self.emit_log("INFO", tr("client_connected").format(tag))
+        self.peers_changed.emit(self.peers())
+
+    def peers(self) -> list:
+        """当前已连接客户端标识列表。"""
+        return list(getattr(self, "_clients", {}).keys())
 
     def _on_client_data(self, data, meta, tag: str):
         r = self._reassemblers.get(tag)
@@ -164,18 +172,21 @@ class TcpServerChannel(Channel):
                 self.emit_received(frame, {"dir": "in", "peer": tag})
         self._clients.pop(tag, None)
         self.emit_log("WARN", tr("client_disconnected").format(tag))
+        self.peers_changed.emit(self.peers())
 
     def close(self):
         if hasattr(self, "_idle_timer"):
             self._idle_timer.stop()
+        reassemblers = getattr(self, "_reassemblers", {})
         for tag, r in getattr(self, "_clients", {}).items():
             # flush 残留
-            reasm = self._reassemblers.get(tag)
+            reasm = reassemblers.get(tag)
             if reasm:
                 for frame in reasm.flush():
                     self.emit_received(frame, {"dir": "in", "peer": tag})
             r.stop()
             r.wait(1000)
+        reassemblers.clear()
         if hasattr(self, "_acceptor"):
             self._acceptor.stop()
             self._acceptor.wait(2000)
@@ -225,16 +236,29 @@ class UdpChannel(Channel):
     def open(self, cfg: dict):
         self.status = ChannelStatus.CONNECTING
         self._sock = _new_socket(udp=True)
+        port = int(cfg["port"])
         local_port = int(cfg.get("local_port", 0) or 0)
+        is_mcast = bool(cfg.get("multicast"))
+        group = (cfg.get("multicast_group", "") or "").strip()
+        iface = (cfg.get("multicast_iface", "") or "").strip()
         try:
-            if local_port:
+            if is_mcast or local_port:
                 self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if is_mcast:
+                if not group:
+                    raise ValueError("multicast group required")
+                # 绑定组播端口以接收组内数据
+                self._sock.bind(("", local_port or port))
+                mreq = socket.inet_aton(group) + socket.inet_aton(iface or "0.0.0.0")
+                self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                self._sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+            elif local_port:
                 self._sock.bind(("0.0.0.0", local_port))
         except Exception as e:
             self.emit_error(str(e))
             self.status = ChannelStatus.ERROR
             return
-        self._target = (cfg["host"], int(cfg["port"]))
+        self._target = (group if is_mcast else cfg["host"], port)
         if cfg.get("broadcast"):
             self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.status = ChannelStatus.CONNECTED

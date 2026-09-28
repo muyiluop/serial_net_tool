@@ -41,10 +41,16 @@ class CollapsibleSection(QWidget):
         self._header = _HeaderFrame(self.toggle)
         self._header.setObjectName("collapsible_header")
         h = QHBoxLayout(self._header)
-        h.setContentsMargins(10, 6, 10, 6)
+        h.setContentsMargins(0, 5, 10, 5)
         h.setSpacing(8)
+        # 展开态左侧强调条
+        self._bar = QFrame()
+        self._bar.setObjectName("accent_bar")
+        self._bar.setFixedWidth(3)
+        h.addWidget(self._bar)
         self._arrow = QLabel("▸" if collapsed else "▾")
-        self._arrow.setObjectName("dim")
+        self._arrow.setObjectName("arrow")
+        self._arrow.setFixedWidth(12)
         self._title = QLabel(title)
         self._title.setObjectName("h1")
         h.addWidget(self._arrow)
@@ -96,3 +102,5 @@ class CollapsibleSection(QWidget):
     def _apply(self):
         self._content.setVisible(not self._collapsed)
         self._arrow.setText("▸" if self._collapsed else "▾")
+        # 展开态显示左侧强调条
+        self._bar.setVisible(not self._collapsed)

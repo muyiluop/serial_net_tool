@@ -26,26 +26,18 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLabel,
     QScrollArea,
-    QSizePolicy,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
-from ..core.utils import text_to_bytes, bytes_to_text
-from ..core.autoreply import ReplyRule
-from ..tools.crc import PRESETS, crc_hex
+from ..core.utils import text_to_bytes, parse_int
+from ..core.autoreply import ReplyRule, validate_rule
+from ..tools.crc import PRESETS, crc, crc_custom, crc_hex
 from ..tools.check import all_checksums
 from ..tools.conv import int_to_base, swap_endian, str_to_hex, hex_to_str
 from ..core.config import Config
 from ..core.autoreply import AutoReplyEngine
 from ..core.i18n import tr
-
-
-def _parse_int(text: str) -> int:
-    """解析十进制或十六进制(0x前缀)字符串为整数。"""
-    s = text.strip()
-    if s.startswith("0x") or s.startswith("0X"):
-        return int(s, 16)
-    return int(s, 0)  # int(s, 0) 自动检测 0x/0o/0b 前缀
+from ..core.theme import tokens
 
 
 class ToolsPanel(QWidget):
@@ -91,7 +83,9 @@ class ToolsPanel(QWidget):
         layout.setSpacing(6)
 
         self.crc_algo = QComboBox()
-        self.crc_algo.addItems(list(PRESETS.keys()))
+        for name in PRESETS:
+            self.crc_algo.addItem(name, name)
+        self.crc_algo.addItem(tr("crc_custom"), "__custom__")
         layout.addWidget(self.crc_algo)
 
         h = QHBoxLayout()
@@ -111,16 +105,65 @@ class ToolsPanel(QWidget):
         self.crc_in.setPlaceholderText(tr("input_data"))
         layout.addWidget(self.crc_in, 1)
 
+        # ---- 自定义参数（仅"自定义"时显示） ----
+        self.crc_custom_box = QGroupBox(tr("crc_custom_params"))
+        cg = QGridLayout(self.crc_custom_box)
+        cg.setSpacing(4)
+        self.crc_width = QComboBox()
+        for bits in (8, 16, 32):
+            self.crc_width.addItem(f"{bits}", bits)
+        self.crc_width.setCurrentText("16")
+        self.crc_poly = QLineEdit("0x8005")
+        self.crc_init = QLineEdit("0xFFFF")
+        self.crc_xorout = QLineEdit("0x0000")
+        self.crc_refin = QCheckBox(tr("crc_refin"))
+        self.crc_refout = QCheckBox(tr("crc_refout"))
+        self.crc_refin.setChecked(True)
+        self.crc_refout.setChecked(True)
+        for i, (lbl, wid) in enumerate([
+            (tr("crc_width"), self.crc_width),
+            (tr("crc_poly"), self.crc_poly),
+            (tr("crc_init"), self.crc_init),
+            (tr("crc_xorout"), self.crc_xorout),
+        ]):
+            lab = QLabel(lbl)
+            lab.setObjectName("dim")
+            cg.addWidget(lab, i, 0)
+            cg.addWidget(wid, i, 1)
+        cg.addWidget(self.crc_refin, 4, 0, 1, 2)
+        cg.addWidget(self.crc_refout, 5, 0, 1, 2)
+        cg.setColumnStretch(1, 1)
+        self.crc_custom_box.setVisible(False)
+        layout.addWidget(self.crc_custom_box)
+
         layout.addWidget(QLabel(tr("result")))
         self.crc_out = QLineEdit()
         self.crc_out.setReadOnly(True)
         self.crc_out.setText("0")
+        self.crc_out.setObjectName("mono")
         layout.addWidget(self.crc_out)
+        self.crc_dec = QLabel("DEC: 0")
+        self.crc_dec.setObjectName("dim")
+        self.crc_bin = QLabel("BIN: 0")
+        self.crc_bin.setObjectName("dim")
+        self.crc_bin.setWordWrap(True)
+        layout.addWidget(self.crc_dec)
+        layout.addWidget(self.crc_bin)
 
-        self.crc_algo.currentTextChanged.connect(self._crc_update)
+        self.crc_algo.currentIndexChanged.connect(self._on_crc_algo_changed)
         self.crc_in.textChanged.connect(self._crc_update)
         self.crc_bg.buttonClicked.connect(self._crc_update)
+        for wid in (self.crc_poly, self.crc_init, self.crc_xorout):
+            wid.textChanged.connect(self._crc_update)
+        self.crc_width.currentIndexChanged.connect(self._crc_update)
+        self.crc_refin.toggled.connect(self._crc_update)
+        self.crc_refout.toggled.connect(self._crc_update)
+        self._crc_update()
         return w
+
+    def _on_crc_algo_changed(self, _idx):
+        self.crc_custom_box.setVisible(self.crc_algo.currentData() == "__custom__")
+        self._crc_update()
 
     def _crc_update(self):
         try:
@@ -129,7 +172,26 @@ class ToolsPanel(QWidget):
             data = text_to_bytes(
                 text, mode, self.config.get("default_encoding", "utf-8")
             )
-            self.crc_out.setText(crc_hex(self.crc_algo.currentText(), data))
+            algo = self.crc_algo.currentData()
+            if algo is None:
+                return
+            if algo == "__custom__":
+                width = int(self.crc_width.currentData())
+                val = crc_custom(
+                    data,
+                    width,
+                    parse_int(self.crc_poly.text() or "0"),
+                    parse_int(self.crc_init.text() or "0"),
+                    self.crc_refin.isChecked(),
+                    self.crc_refout.isChecked(),
+                    parse_int(self.crc_xorout.text() or "0"),
+                )
+                self.crc_out.setText(format(val, f"0{width // 4}X"))
+            else:
+                val = crc(algo, data)
+                self.crc_out.setText(crc_hex(algo, data))
+            self.crc_dec.setText(f"DEC: {val}")
+            self.crc_bin.setText(f"BIN: {val:b}")
         except Exception as e:
             self.crc_out.setText(f"ERR:{e}")
 
@@ -223,8 +285,8 @@ class ToolsPanel(QWidget):
 
         # --- 字符串 ↔ Hex ---
         sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setObjectName("dim")
+        sep1.setObjectName("hsep")
+        sep1.setFixedHeight(1)
         layout.addWidget(sep1)
 
         lbl2 = QLabel(tr("str_to_hex"))
@@ -250,8 +312,8 @@ class ToolsPanel(QWidget):
 
         # --- 字节序交换 ---
         sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setObjectName("dim")
+        sep2.setObjectName("hsep")
+        sep2.setFixedHeight(1)
         layout.addWidget(sep2)
 
         lbl3 = QLabel(tr("swap_endian_btn"))
@@ -294,18 +356,26 @@ class ToolsPanel(QWidget):
             self.conv_out.setText(f"ERR:{e}")
 
     def _str_to_hex(self):
-        self.conv_strout.setText(
-            str_to_hex(
-                self.conv_str.text(), self.config.get("default_encoding", "utf-8")
+        try:
+            self.conv_strout.setText(
+                str_to_hex(
+                    self.conv_str.text(),
+                    self.config.get("default_encoding", "utf-8"),
+                )
             )
-        )
+        except Exception as e:
+            self.conv_strout.setText(f"ERR:{e}")
 
     def _hex_to_str(self):
-        self.conv_strout.setText(
-            hex_to_str(
-                self.conv_hexin.text(), self.config.get("default_encoding", "utf-8")
+        try:
+            self.conv_strout.setText(
+                hex_to_str(
+                    self.conv_str.text(),
+                    self.config.get("default_encoding", "utf-8"),
+                )
             )
-        )
+        except Exception as e:
+            self.conv_strout.setText(f"ERR:{e}")
 
     def _swap(self):
         try:
@@ -455,6 +525,11 @@ class ToolsPanel(QWidget):
         self.ar_det_rate.setMaximum(999999)
         form.addRow(tr("ar_rate_ms"), self.ar_det_rate)
 
+        self.ar_error = QLabel("")
+        self.ar_error.setObjectName("badge_err")
+        self.ar_error.setWordWrap(True)
+        form.addRow(self.ar_error)
+
         layout.addWidget(detail)
 
         # 信号连接
@@ -485,17 +560,30 @@ class ToolsPanel(QWidget):
         self._ar_data = [dict(r) for r in cfgs]
         self._ar_refresh_list()
 
+    @staticmethod
+    def _ar_rule_valid(r: dict):
+        """校验单条规则，返回 (ok, error)。"""
+        return validate_rule(ReplyRule.from_dict(r))
+
     def _ar_refresh_list(self):
         self._ar_loading = True
         self.ar_list.clear()
+        err_color = QColor(tokens()["err"])
         for i, r in enumerate(self._ar_data):
             enabled = r.get("enabled", True)
             match = r.get("match", "contains")
             pattern = r.get("pattern", "")
             reply = r.get("reply", "")
-            mark = "\u2713" if enabled else "\u2717"
+            ok, err = self._ar_rule_valid(r)
+            if not ok:
+                mark = "\u26a0"  # 非法
+            else:
+                mark = "\u2713" if enabled else "\u2717"
             text = f"{mark} [{match}] {pattern} \u2192 {reply}"
             item = QListWidgetItem(text)
+            if not ok:
+                item.setForeground(err_color)
+                item.setToolTip(err)
             self.ar_list.addItem(item)
         self._ar_loading = False
         if self._ar_data:
@@ -545,19 +633,33 @@ class ToolsPanel(QWidget):
         r["reply"] = self.ar_det_reply.text()
         r["delay_ms"] = self.ar_det_delay.value()
         r["rate_limit_ms"] = self.ar_det_rate.value()
-        # 更新列表显示
-        enabled = r["enabled"]
-        mark = "\u2713" if enabled else "\u2717"
-        text = f"{mark} [{r['match']}] {r['pattern']} \u2192 {r['reply']}"
-        self.ar_list.item(row).setText(text)
+        # 校验并给出内联提示
+        ok, err = self._ar_rule_valid(r)
+        self.ar_error.setText("" if ok else err)
+        item = self.ar_list.item(row)
+        if ok:
+            mark = "\u2713" if r["enabled"] else "\u2717"
+            item.setForeground(self.ar_list.palette().text())
+            item.setToolTip("")
+        else:
+            mark = "\u26a0"
+            item.setForeground(QColor(tokens()["err"]))
+            item.setToolTip(err)
+        item.setText(f"{mark} [{r['match']}] {r['pattern']} \u2192 {r['reply']}")
         self._ar_apply()
 
     def _ar_apply(self):
         self.config.set("autoreply_rules", self._ar_data)
-        if self.ar_enabled.isChecked():
-            self.autoreply.set_rules([ReplyRule(**r) for r in self._ar_data])
-        else:
+        if not self.ar_enabled.isChecked():
             self.autoreply.set_rules([])
+            return
+        # 仅合法规则进入引擎；非法规则保留在编辑区但不生效
+        valid = []
+        for r in self._ar_data:
+            ok, _err = self._ar_rule_valid(r)
+            if ok:
+                valid.append(ReplyRule.from_dict(r))
+        self.autoreply.set_rules(valid)
 
     def _ar_add(self):
         self._ar_data.append(
@@ -589,10 +691,23 @@ class ToolsPanel(QWidget):
         if path:
             import json
 
-            with open(path, "r", encoding="utf-8") as f:
-                self._ar_data = json.load(f)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                QMessageBox.warning(self, tr("error"), tr("ar_import_failed").format(e))
+                return
+            if not isinstance(data, list):
+                QMessageBox.warning(self, tr("error"), tr("ar_import_failed").format("not a list"))
+                return
+            self._ar_data = [dict(r) for r in data if isinstance(r, dict)]
+            invalid = sum(1 for r in self._ar_data if not self._ar_rule_valid(r)[0])
             self._ar_refresh_list()
             self._ar_apply()
+            if invalid:
+                QMessageBox.warning(
+                    self, tr("notice"), tr("ar_import_invalid").format(invalid)
+                )
 
     def _ar_export(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -611,11 +726,7 @@ class ToolsPanel(QWidget):
         from ..plugins.modbus_tool.frame import (
             build_rtu_request,
             build_tcp_request,
-            make_read_pdu,
-            make_write_single_coil_pdu,
-            make_write_single_reg_pdu,
-            make_write_multiple_regs_pdu,
-            make_write_multiple_coils_pdu,
+            build_pdu_for_fc,
         )
 
         w = QWidget()
@@ -675,7 +786,7 @@ class ToolsPanel(QWidget):
         addr_lbl.setObjectName("dim")
         self.mb_addr = QLineEdit("0")
         self.mb_addr.setMaximumWidth(100)
-        self.mb_addr.setPlaceholderText("dec 或 0x4000")
+        self.mb_addr.setPlaceholderText(tr("mb_addr_hint"))
         addr_row.addWidget(addr_lbl)
         addr_row.addWidget(self.mb_addr)
         addr_row.addStretch()
@@ -733,7 +844,7 @@ class ToolsPanel(QWidget):
         multi_lbl = QLabel(tr("mb_write_values"))
         multi_lbl.setObjectName("dim")
         self.mb_multi_vals = QLineEdit()
-        self.mb_multi_vals.setPlaceholderText("1 2 3 或 0x0001,0x0002")
+        self.mb_multi_vals.setPlaceholderText(tr("mb_multi_hint"))
         multi_row.addWidget(multi_lbl)
         multi_row.addWidget(self.mb_multi_vals)
         layout.addWidget(multi_wrap)
@@ -781,34 +892,17 @@ class ToolsPanel(QWidget):
         try:
             sid = self.mb_sid.value()
             fc = self.mb_fc.currentData()
-            addr = _parse_int(self.mb_addr.text())
+            addr = parse_int(self.mb_addr.text())
             fmt = self.mb_fmt.currentData()
 
-            from ..plugins.modbus_tool.frame import (
-                build_rtu_request,
-                build_tcp_request,
-                make_read_pdu,
-                make_write_single_coil_pdu,
-                make_write_single_reg_pdu,
-                make_write_multiple_regs_pdu,
-                make_write_multiple_coils_pdu,
+            pdu = build_pdu_for_fc(
+                fc,
+                addr,
+                quantity=self.mb_qty.value(),
+                value=self.mb_val.value(),
+                coil_on=self.mb_coil_on.isChecked(),
+                multi_values=self._mb_parse_multi(),
             )
-
-            # 构建 PDU
-            if fc in (0x01, 0x02, 0x03, 0x04):
-                pdu = make_read_pdu(fc, addr, self.mb_qty.value())
-            elif fc == 0x05:
-                pdu = make_write_single_coil_pdu(addr, self.mb_coil_on.isChecked())
-            elif fc == 0x06:
-                pdu = make_write_single_reg_pdu(addr, self.mb_val.value())
-            elif fc == 0x0F:
-                vals = self._mb_parse_multi()
-                pdu = make_write_multiple_coils_pdu(addr, vals)
-            elif fc == 0x10:
-                vals = self._mb_parse_multi()
-            else:
-                self.mb_preview.setText("ERR: 未知功能码")
-                return
 
             # 包装帧头
             if fmt == "tcp":

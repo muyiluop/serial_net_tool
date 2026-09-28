@@ -26,9 +26,66 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QDateTime
 from PySide6.QtGui import QFontMetrics
 
+import struct
+
 from ...core.i18n import tr
-from .register_map import RegisterMap
+from ...core.utils import parse_int
+from .register_map import RegisterMap, REG_TYPE_NAMES
 from .engine import ModbusEngine
+from .frame import (
+    parse_rtu_frame,
+    parse_tcp_frame,
+    parse_read_response,
+    tcp_frame_length,
+    format_exception,
+)
+
+
+def _describe_frame(frame: dict) -> tuple:
+    """把解析后的帧整理为表格行：(unit, fc, addr, qty, values, exception)。"""
+    unit = frame.get("slave_id", frame.get("unit_id", ""))
+    fc = frame.get("func_code", 0)
+    data = frame.get("data", b"") or b""
+    if frame.get("is_exception"):
+        return unit, f"0x{fc:02X}", "", "", "", format_exception(frame.get("exc_code", 0))
+    addr = qty = ""
+    values = ""
+    try:
+        if fc in (0x01, 0x02, 0x03, 0x04):
+            if len(data) == 4:
+                a, q = struct.unpack(">HH", data)
+                addr, qty = a, q
+            elif data:
+                parsed = parse_read_response(data, fc)
+                qty = len(parsed)
+                values = ", ".join("1" if v else "0" for v in parsed) if fc in (0x01, 0x02) else ", ".join(map(str, parsed))
+        elif fc in (0x05, 0x06):
+            a, v = struct.unpack(">HH", data[:4])
+            addr = a
+            values = ("ON" if v == 0xFF00 else "OFF") if fc == 0x05 else str(v)
+        elif fc in (0x0F, 0x10):
+            if len(data) >= 6:
+                a, q = struct.unpack(">HH", data[:4])
+                addr, qty = a, q
+                bc = data[4]
+                payload = data[5:5 + bc]
+                if fc == 0x10:
+                    regs = [struct.unpack(">H", payload[i:i + 2])[0]
+                            for i in range(0, len(payload) - 1, 2)]
+                    values = ", ".join(map(str, regs))
+                else:
+                    bits = []
+                    for i in range(q):
+                        bits.append("1" if payload[i // 8] & (1 << (i % 8)) else "0")
+                    values = ", ".join(bits)
+            elif len(data) == 4:
+                a, q = struct.unpack(">HH", data)
+                addr, qty = a, q
+        else:
+            values = data.hex(" ").upper()
+    except Exception as e:
+        values = f"parse error: {e}"
+    return unit, f"0x{fc:02X}", addr, qty, values, ""
 
 
 def _label(text: str) -> QLabel:
@@ -53,9 +110,20 @@ class ModbusToolWidget(QWidget):
         self.main_window = main_window
         self.reg_map = RegisterMap()
         self.engine = ModbusEngine(self.reg_map)
+        self._shutdown_done = False
         self._build()
         # 延迟刷新会话列表
         QTimer.singleShot(300, self._refresh_sessions)
+
+    def shutdown(self):
+        """窗口关闭/销毁时释放资源：解绑通道并停止轮询（幂等）。"""
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        try:
+            self.engine.detach()
+        except Exception:
+            pass
 
     # ================= 布局构建 =================
 
@@ -83,6 +151,7 @@ class ModbusToolWidget(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_reg_tab(), tr("mb_register_config"))
         self.tabs.addTab(self._build_data_tab(), tr("mb_live_data"))
+        self.tabs.addTab(self._build_parse_tab(), tr("mb_parse"))
         self.tabs.addTab(self._build_log_tab(), tr("mb_frame_log"))
         self.tabs.setMinimumHeight(320)
         cl.addWidget(self.tabs, 1)
@@ -187,28 +256,23 @@ class ModbusToolWidget(QWidget):
         layout.addLayout(toolbar)
 
         # 配置表
-        self.cfg_table = QTableWidget(0, 5)
+        self.cfg_table = QTableWidget(0, 6)
         self.cfg_table.setHorizontalHeaderLabels(
             [
                 tr("name"),
                 tr("address"),
+                tr("function"),
                 tr("mb_reg_type"),
                 tr("value"),
                 tr("description"),
             ]
         )
-        self.cfg_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.cfg_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeToContents
-        )
-        self.cfg_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeToContents
-        )
-        self.cfg_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.cfg_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.cfg_table.setMinimumHeight(200)
-        # self.cfg_table.setMinimumHeight(160)
-        # self.cfg_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        header = self.cfg_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in (1, 2, 3):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
         self.cfg_table.setMinimumHeight(120)
         self.cfg_table.setMaximumHeight(400)
         layout.addWidget(self.cfg_table, 1)
@@ -244,6 +308,81 @@ class ModbusToolWidget(QWidget):
         self.data_table.setMinimumHeight(200)
         layout.addWidget(self.data_table)
         return w
+
+    def _build_parse_tab(self) -> QWidget:
+        """帧解析 Tab：粘贴 Hex 帧 → 解析为字段表格。"""
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(_label(tr("mb_format")))
+        self.parse_fmt = QComboBox()
+        self.parse_fmt.addItem(tr("mb_auto"), "auto")
+        self.parse_fmt.addItem("RTU", "rtu")
+        self.parse_fmt.addItem("TCP", "tcp")
+        self.parse_fmt.setMinimumWidth(90)
+        top.addWidget(self.parse_fmt)
+        self.parse_btn = QPushButton(tr("mb_parse_btn"))
+        self.parse_btn.setObjectName("accent")
+        top.addWidget(self.parse_btn)
+        top.addStretch()
+        layout.addLayout(top)
+
+        self.parse_in = QPlainTextEdit()
+        self.parse_in.setObjectName("mono")
+        self.parse_in.setPlaceholderText("01 03 00 00 00 01 84 0A")
+        self.parse_in.setMaximumHeight(70)
+        layout.addWidget(self.parse_in)
+
+        self.parse_table = QTableWidget(0, 6)
+        self.parse_table.setHorizontalHeaderLabels([
+            tr("mb_col_unit"), tr("mb_col_fc"), tr("mb_col_addr"),
+            tr("mb_col_qty"), tr("mb_col_values"), tr("mb_col_exception"),
+        ])
+        self.parse_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.parse_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(self.parse_table, 1)
+
+        self.parse_btn.clicked.connect(self._on_parse)
+        return w
+
+    def _append_parse_row(self, row: tuple):
+        r = self.parse_table.rowCount()
+        self.parse_table.insertRow(r)
+        for c, val in enumerate(row):
+            self.parse_table.setItem(r, c, QTableWidgetItem(str(val)))
+
+    def _on_parse(self):
+        self.parse_table.setRowCount(0)
+        text = self.parse_in.toPlainText().strip()
+        if not text:
+            return
+        try:
+            data = bytes.fromhex("".join(text.split()))
+        except Exception as e:
+            self._append_parse_row(("", "", "", "", "", tr("mb_parse_bad_hex").format(e)))
+            return
+        fmt = self.parse_fmt.currentData()
+        frame = None
+        if fmt == "rtu":
+            frame = parse_rtu_frame(data)
+        elif fmt == "tcp":
+            frame = parse_tcp_frame(data)
+        else:
+            # 自动：MBAP 协议标识为 0 且长度字段自洽则按 TCP，否则按 RTU
+            looks_tcp = len(data) >= 8 and data[2:4] == b"\x00\x00"
+            if looks_tcp and tcp_frame_length(data) == len(data):
+                frame = parse_tcp_frame(data)
+            else:
+                frame = parse_rtu_frame(data)
+                if frame is None and looks_tcp:
+                    frame = parse_tcp_frame(data)
+        if frame is None:
+            self._append_parse_row(("", "", "", "", "", tr("mb_parse_fail")))
+            return
+        self._append_parse_row(_describe_frame(frame))
 
     def _build_log_tab(self) -> QWidget:
         """帧日志 Tab。"""
@@ -305,12 +444,51 @@ class ModbusToolWidget(QWidget):
         self.cfg_table.insertRow(row)
         self.cfg_table.setItem(row, 0, QTableWidgetItem(f"Reg{row}"))
         self.cfg_table.setItem(row, 1, QTableWidgetItem(str(row * 2)))
-        self.cfg_table.setItem(row, 2, QTableWidgetItem("uint16"))
-        self.cfg_table.setItem(row, 3, QTableWidgetItem("0"))
-        self.cfg_table.setItem(row, 4, QTableWidgetItem(""))
+        self.cfg_table.setCellWidget(row, 2, self._make_fc_combo(0x03))
+        self.cfg_table.setCellWidget(row, 3, self._make_type_combo("uint16"))
+        val_item = QTableWidgetItem("0")
+        val_item.setFlags(val_item.flags() & ~Qt.ItemIsEditable)  # 值列只读展示
+        self.cfg_table.setItem(row, 4, val_item)
+        self.cfg_table.setItem(row, 5, QTableWidgetItem(""))
         self.cfg_table.blockSignals(False)
         self._sync_to_map()
         self._update_reg_count()
+
+    def _make_type_combo(self, reg_type: str) -> QComboBox:
+        """寄存器类型下拉单元格。"""
+        cb = QComboBox()
+        cb.addItems(REG_TYPE_NAMES)
+        idx = cb.findText(reg_type)
+        cb.setCurrentIndex(idx if idx >= 0 else 0)
+        cb.currentTextChanged.connect(self._on_cfg_changed)
+        return cb
+
+    def _make_fc_combo(self, func_code: int) -> QComboBox:
+        """读取功能码下拉单元格（0x01/0x02/0x03/0x04）。"""
+        cb = QComboBox()
+        for code, key in ((0x01, "mb_read_coils"), (0x02, "mb_read_discrete"),
+                          (0x03, "mb_read_holding"), (0x04, "mb_read_input")):
+            cb.addItem(f"0x{code:02X}", code)
+        idx = cb.findData(int(func_code))
+        cb.setCurrentIndex(idx if idx >= 0 else 2)
+        cb.currentIndexChanged.connect(self._on_cfg_changed)
+        return cb
+
+    def _row_reg_type(self, row: int) -> str:
+        """读取某行的寄存器类型（优先取下拉单元格）。"""
+        cb = self.cfg_table.cellWidget(row, 3)
+        if isinstance(cb, QComboBox):
+            return cb.currentText()
+        item = self.cfg_table.item(row, 3)
+        text = item.text() if item else "uint16"
+        return text if text in REG_TYPE_NAMES else "uint16"
+
+    def _row_func_code(self, row: int) -> int:
+        """读取某行的功能码。"""
+        cb = self.cfg_table.cellWidget(row, 2)
+        if isinstance(cb, QComboBox):
+            return int(cb.currentData())
+        return 0x03
 
     def _del_register(self):
         rows = sorted(
@@ -331,16 +509,18 @@ class ModbusToolWidget(QWidget):
         for r in range(self.cfg_table.rowCount()):
             name = self.cfg_table.item(r, 0)
             addr = self.cfg_table.item(r, 1)
-            rtype = self.cfg_table.item(r, 2)
-            desc = self.cfg_table.item(r, 4)
+            desc = self.cfg_table.item(r, 5)
+            try:
+                address = parse_int(addr.text()) if addr else 0
+            except ValueError:
+                address = 0
             configs.append(
                 {
                     "name": name.text() if name else "",
-                    "address": int(addr.text())
-                    if addr and addr.text().isdigit()
-                    else 0,
-                    "reg_type": rtype.text() if rtype else "uint16",
+                    "address": address,
+                    "reg_type": self._row_reg_type(r),
                     "description": desc.text() if desc else "",
+                    "func_code": self._row_func_code(r),
                 }
             )
         self.reg_map.from_list(configs)
@@ -378,7 +558,7 @@ class ModbusToolWidget(QWidget):
         # 同步配置表中的值列
         for i, cfg in enumerate(self.reg_map.configs):
             if i < self.cfg_table.rowCount():
-                val_item = self.cfg_table.item(i, 3)
+                val_item = self.cfg_table.item(i, 4)
                 if val_item:
                     if isinstance(cfg.value, float):
                         val_item.setText(f"{cfg.value:.4f}")

@@ -2,6 +2,11 @@
 from typing import Literal
 
 
+def parse_int(text: str) -> int:
+    """解析十进制或带 0x/0o/0b 前缀的整数；无法解析时抛 ValueError。"""
+    return int((text or "").strip(), 0)
+
+
 def text_to_bytes(text: str, mode: Literal["ascii", "hex"], encoding: str = "utf-8") -> bytes:
     """发送编辑框内容 -> 字节。
     hex 模式：忽略空格/换行，每两字符一字节。

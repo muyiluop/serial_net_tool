@@ -13,7 +13,12 @@ class Config:
         "tx_newline": True,
         "default_encoding": "utf-8",
         "sessions": [],
-        "disabled_plugins": ["modbus_tool"],  # Modbus 插件默认禁用
+        "autoreply_rules": [],
+        "disabled_plugins": [],
+        # 通信日志
+        "log_max_lines": 5000,
+        "log_wrap": True,
+        "log_filter_dir": "both",
     }
 
     def __init__(self, path: str | None = None):

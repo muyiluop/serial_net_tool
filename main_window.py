@@ -39,9 +39,10 @@ from .core.autoreply import AutoReplyEngine
 from .core.plugin_manager import PluginManager
 from .core.i18n import tr
 from .core.telemetry import get_telemetry
-from .core.theme import tokens, status_colors
+from .core.theme import status_colors, status_icon
 from .ui.session_config import SessionConfigWidget
 from .ui.recv_send import RecvSendWidget
+from .ui.mqtt_panel import MqttPanel
 from .ui.tools_panel import ToolsPanel
 from .ui.plugin_panel import PluginManagerWidget
 from .ui.settings_dialog import SettingsDialog
@@ -89,7 +90,7 @@ class SessionView(QWidget):
 
         # 标题栏右侧：状态徽标 + 打开/关闭按钮
         self.state_badge = QLabel(tr("disconnected"))
-        self.state_badge.setObjectName("dim")
+        self.state_badge.setObjectName("badge_idle")
         self.toggle_btn = QPushButton(tr("open"))
         self.toggle_btn.setObjectName("accent")
         self.toggle_btn.setFixedWidth(92)
@@ -100,8 +101,19 @@ class SessionView(QWidget):
         self.cfg_section.add_header_widget(self.toggle_btn)
         layout.addWidget(self.cfg_section)
 
+        # MQTT 专属运行期面板（发布/订阅/遗嘱）
+        self.mqtt_panel = None
+        self.mqtt_section = None
+        if self.session["kind"] == "mqtt":
+            self.mqtt_panel = MqttPanel(self.config)
+            if self.session.get("cfg"):
+                self.mqtt_panel.apply_config(self.session["cfg"])
+            self.mqtt_section = CollapsibleSection(tr("mqtt_panel_title"), collapsed=True)
+            self.mqtt_section.set_content_widget(self.mqtt_panel)
+            layout.addWidget(self.mqtt_section)
+
         # 主体
-        self.body = RecvSendWidget(self.autoreply, self.config)
+        self.body = RecvSendWidget(self.autoreply, self.config, self.session["kind"])
         layout.addWidget(self.body, 1)
 
     def _title(self) -> str:
@@ -125,9 +137,13 @@ class SessionView(QWidget):
         if isinstance(self.body, RecvSendWidget):
             self.body.bind(self.channel)
         cfg = self.cfg_widget.get_config()
+        if self.mqtt_panel is not None:
+            cfg.update(self.mqtt_panel.collect_config())
         self.session["cfg"] = cfg
         cfg.update({"id": self.session["id"], "kind": self.session["kind"]})
         self.channel.open(cfg)
+        if self.mqtt_panel is not None:
+            self.mqtt_panel.bind(self.channel)
         # 连接后：锁定并折叠配置，给收发区让位
         self.cfg_widget.set_enabled_all(False)
         self.cfg_section.set_collapsed(True)
@@ -140,20 +156,25 @@ class SessionView(QWidget):
             if isinstance(self.body, RecvSendWidget):
                 self.body.unbind()
             self.channel = None
+        # 保存 MQTT 运行期设置（订阅/发布目标）
+        if self.mqtt_panel is not None:
+            if isinstance(self.session.get("cfg"), dict):
+                self.session["cfg"].update(self.mqtt_panel.collect_config())
+            self.mqtt_panel.unbind()
         # 断开后：解锁并展开配置
         self.cfg_widget.set_enabled_all(True)
         self.cfg_section.set_collapsed(False)
         self.refresh_title()
         self.toggle_btn.setText(tr("open"))
         self.state_badge.setText(tr("disconnected"))
-        self.state_badge.setObjectName("dim")
+        self.state_badge.setObjectName("badge_idle")
         self._repolish(self.state_badge)
 
     def set_status_badge(self, status):
         label = status.label
         self.state_badge.setText(label)
         name = status.name
-        obj = "dim"
+        obj = "badge_idle"
         if name in ("CONNECTED", "LISTENING"):
             obj = "badge_ok"
         elif name == "ERROR":
@@ -249,6 +270,9 @@ class MainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
         self.tree.currentItemChanged.connect(self._on_select)
         self.tree.itemDoubleClicked.connect(lambda _it: self.toggle_current())
+        # 长名称用省略号而非横向滚动条
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree.setTextElideMode(Qt.ElideRight)
         sb.addWidget(self.tree, 1)
 
         # 底部操作按钮：开/关 占满一行，重命名/删除 各占半
@@ -268,7 +292,7 @@ class MainWindow(QMainWindow):
         self._rename_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._rename_btn.clicked.connect(self._rename_current)
         self._del_btn = QPushButton(tr("delete"))
-        self._del_btn.setObjectName("ghost")
+        self._del_btn.setObjectName("danger")
         self._del_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._del_btn.clicked.connect(self._delete_current)
         ops2.addWidget(self._rename_btn)
@@ -371,9 +395,14 @@ class MainWindow(QMainWindow):
             sid = it.data(Qt.UserRole)
             view = self.views.get(sid)
             if view and view.channel:
-                self._set_item_status_color(it, view.channel.status.name)
+                self._set_item_status(it, view.channel.status.name)
             else:
-                self._set_item_status_color(it, "DISCONNECTED")
+                self._set_item_status(it, "DISCONNECTED")
+        # 重新渲染各会话日志（方向配色随主题变化）
+        for view in self.views.values():
+            body = getattr(view, "body", None)
+            if hasattr(body, "_rerender"):
+                body._rerender()
         # 刷新状态栏主题标签
         theme_name = self.config.get("theme", "dark")
         self.theme_lbl.setText(f"theme: {tr(theme_name)}")
@@ -401,6 +430,10 @@ class MainWindow(QMainWindow):
                 layout = QVBoxLayout(dlg)
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.addWidget(widget)
+                # 窗口关闭时释放插件资源（若提供 shutdown）
+                if hasattr(widget, "shutdown"):
+                    dlg.finished.connect(lambda _=0, w=widget: w.shutdown())
+                    dlg.destroyed.connect(lambda _=None, w=widget: w.shutdown())
                 # 窗口关闭时从列表中移除
                 dlg.destroyed.connect(lambda _=None, d=dlg: self._on_ext_closed(d))
                 self._extension_windows.append(dlg)
@@ -455,19 +488,24 @@ class MainWindow(QMainWindow):
             }
             self._add_view(session)
 
+    def _item_label(self, kind: str, name: str) -> str:
+        """会话列表项显示文本（含类型图标前缀）。"""
+        icon = KIND_ICONS.get(kind, "")
+        return f"{icon}  {name}" if icon else name
+
+    def _item_tooltip(self, kind: str, name: str) -> str:
+        kind_label = tr(KIND_LABELS.get(kind, kind))
+        return f"{kind_label} · {name}"
+
     def _add_view(self, session):
         view = SessionView(session, self.config, self.autoreply)
         view.main_window = self
         self.views[session["id"]] = view
         self.sessions.append(session)
-        icon = KIND_ICONS.get(session["kind"], "")
-        item = QListWidgetItem(
-            f"{icon}  {session['name']}" if icon else session["name"]
-        )
+        item = QListWidgetItem(self._item_label(session["kind"], session["name"]))
         item.setData(Qt.UserRole, session["id"])
-        kind_label = tr(KIND_LABELS.get(session["kind"], session["kind"]))
-        item.setToolTip(f"{kind_label} · {session['name']}")
-        self._set_item_status_color(item, "DISCONNECTED")
+        item.setToolTip(self._item_tooltip(session["kind"], session["name"]))
+        self._set_item_status(item, "DISCONNECTED")
         self.tree.addItem(item)
         self.stack.addWidget(view)
         self.tree.setCurrentItem(item)
@@ -544,8 +582,10 @@ class MainWindow(QMainWindow):
             self, tr("rename_title"), tr("name_label"), QLineEdit.Normal, old
         )
         if ok and name.strip():
-            view.session["name"] = name.strip()
-            item.setText(name.strip())
+            new_name = name.strip()
+            view.session["name"] = new_name
+            item.setText(self._item_label(view.session["kind"], new_name))
+            item.setToolTip(self._item_tooltip(view.session["kind"], new_name))
             view.refresh_title()
 
     def _delete_current(self):
@@ -595,12 +635,14 @@ class MainWindow(QMainWindow):
         for i in range(self.tree.count()):
             it = self.tree.item(i)
             if it.data(Qt.UserRole) == sid:
-                self._set_item_status_color(it, status_name)
+                self._set_item_status(it, status_name)
                 break
 
-    def _set_item_status_color(self, item, status_name):
+    def _set_item_status(self, item, status_name):
+        """会话项状态可视化：彩色圆点图标 + 文字状态色。"""
         colors = status_colors()
         item.setForeground(QColor(colors.get(status_name, colors["DISCONNECTED"])))
+        item.setIcon(status_icon(status_name))
 
     def _update_empty_state(self):
         has = self.tree.count() > 0

@@ -163,6 +163,9 @@ def parse_tcp_frame(data: bytes) -> Optional[dict]:
     txn_id, proto_id, length, unit_id = struct.unpack(">HHHB", data[:7])
     if proto_id != 0:
         return None
+    # length 至少包含 UnitID(1)+FunctionCode(1)
+    if length < 2:
+        return None
     total = 6 + length  # MBAP header 6 bytes + length field covers UnitID+PDU
     if len(data) < total:
         return None
@@ -189,10 +192,12 @@ def parse_tcp_frame(data: bytes) -> Optional[dict]:
 
 
 def tcp_frame_length(data: bytes) -> int:
-    """返回 TCP 帧预期总长度（含 MBAP header），0 表示数据不足。"""
+    """返回 TCP 帧预期总长度（含 MBAP header），0 表示数据不足或非法。"""
     if len(data) < 7:
         return 0
-    _, _, length, _ = struct.unpack(">HHHB", data[:7])
+    _, proto_id, length, _ = struct.unpack(">HHHB", data[:7])
+    if proto_id != 0 or length < 2:
+        return 0
     return 6 + length
 
 
@@ -232,6 +237,39 @@ def make_write_multiple_coils_pdu(addr: int, values: list) -> bytes:
         if v:
             packed[i // 8] |= (1 << (i % 8))
     return struct.pack(">HHB", addr, qty, byte_count) + bytes(packed)
+
+
+def build_pdu_for_fc(
+    func_code: int,
+    address: int,
+    quantity: int = 1,
+    value: int = 0,
+    coil_on: bool = False,
+    multi_values: Optional[list] = None,
+) -> bytes:
+    """按功能码构建请求 PDU（纯函数，便于单元测试与报文构造器复用）。
+
+    0x01-0x04 读请求；0x05 写单线圈；0x06 写单寄存器；
+    0x0F 写多线圈（值转 bool）；0x10 写多寄存器（值按 16 位截断）。
+    参数不合法时抛 ValueError。
+    """
+    if func_code in (0x01, 0x02, 0x03, 0x04):
+        return make_read_pdu(func_code, address, quantity)
+    if func_code == 0x05:
+        return make_write_single_coil_pdu(address, coil_on)
+    if func_code == 0x06:
+        return make_write_single_reg_pdu(address, value)
+    if func_code == 0x0F:
+        vals = [bool(v) for v in (multi_values or [])]
+        if not vals:
+            raise ValueError("FC 0x0F requires multi_values")
+        return make_write_multiple_coils_pdu(address, vals)
+    if func_code == 0x10:
+        vals = [int(v) & 0xFFFF for v in (multi_values or [])]
+        if not vals:
+            raise ValueError("FC 0x10 requires multi_values")
+        return make_write_multiple_regs_pdu(address, vals)
+    raise ValueError(f"unsupported function code: 0x{func_code:02X}")
 
 
 def parse_read_response(data: bytes, func_code: int) -> list:

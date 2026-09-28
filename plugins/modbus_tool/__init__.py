@@ -15,7 +15,7 @@ NAME = "Modbus"
 VERSION = "1.0"
 DESCRIPTION = "Modbus master/slave tool reusing serial/TCP connections"
 TOOL_TYPE = "window"  # 以独立窗口形式打开
-ENABLE = False
+ENABLE = True
 
 
 def create_widget(ctx=None):

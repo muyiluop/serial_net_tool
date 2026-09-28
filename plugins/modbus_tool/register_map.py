@@ -45,6 +45,8 @@ class RegisterConfig:
     address: int = 0
     reg_type: str = "uint16"
     description: str = ""
+    # 读取该地址块使用的 Modbus 功能码（0x01 线圈 / 0x02 离散输入 / 0x03 保持 / 0x04 输入）
+    func_code: int = 0x03
     # 当前值（解析后的人类可读值）
     value: float | int = 0
     # 原始寄存器值（用于从站模式）
@@ -65,8 +67,21 @@ class RegisterMap:
 
     # ==================== 配置管理 ====================
 
-    def add(self, name: str, address: int, reg_type: str = "uint16", description: str = "") -> RegisterConfig:
-        cfg = RegisterConfig(name=name, address=address, reg_type=reg_type, description=description)
+    def add(
+        self,
+        name: str,
+        address: int,
+        reg_type: str = "uint16",
+        description: str = "",
+        func_code: int = 0x03,
+    ) -> RegisterConfig:
+        cfg = RegisterConfig(
+            name=name,
+            address=address,
+            reg_type=reg_type,
+            description=description,
+            func_code=func_code,
+        )
         self.configs.append(cfg)
         return cfg
 
@@ -119,35 +134,42 @@ class RegisterMap:
 
     def get_poll_blocks(self) -> list:
         """生成主站轮询的地址块列表。
-        返回 [(start_addr, count), ...]，合并连续地址以减少请求数。
+
+        返回 [(func_code, start_addr, count), ...]，按功能码分组，组内合并连续地址
+        以减少请求数（允许小间隙合并）。
         """
         if not self.configs:
             return []
-        # 收集所有需要读取的地址范围
-        ranges = []
+        by_fc: dict = {}
         for cfg in self.configs:
-            cnt = reg_count_for_type(cfg.reg_type)
-            ranges.append((cfg.address, cnt))
-        # 按起始地址排序
-        ranges.sort(key=lambda x: x[0])
-        # 合并连续或重叠的范围
-        merged = []
-        cur_start, cur_end = ranges[0][0], ranges[0][0] + ranges[0][1]
-        for addr, cnt in ranges[1:]:
-            if addr <= cur_end + 5:  # 允许小间隙合并
-                cur_end = max(cur_end, addr + cnt)
-            else:
-                merged.append((cur_start, cur_end - cur_start))
-                cur_start, cur_end = addr, addr + cnt
-        merged.append((cur_start, cur_end - cur_start))
-        return merged
+            by_fc.setdefault(int(cfg.func_code), []).append(
+                (cfg.address, reg_count_for_type(cfg.reg_type))
+            )
+        blocks = []
+        for fc in sorted(by_fc):
+            ranges = sorted(by_fc[fc], key=lambda x: x[0])
+            cur_start, cur_end = ranges[0][0], ranges[0][0] + ranges[0][1]
+            for addr, cnt in ranges[1:]:
+                if addr <= cur_end + 5:  # 允许小间隙合并
+                    cur_end = max(cur_end, addr + cnt)
+                else:
+                    blocks.append((fc, cur_start, cur_end - cur_start))
+                    cur_start, cur_end = addr, addr + cnt
+            blocks.append((fc, cur_start, cur_end - cur_start))
+        return blocks
 
     # ==================== 导入/导出 ====================
 
     def to_list(self) -> list:
         """导出为可序列化的列表。"""
         return [
-            {"name": c.name, "address": c.address, "reg_type": c.reg_type, "description": c.description}
+            {
+                "name": c.name,
+                "address": c.address,
+                "reg_type": c.reg_type,
+                "description": c.description,
+                "func_code": c.func_code,
+            }
             for c in self.configs
         ]
 
@@ -155,11 +177,16 @@ class RegisterMap:
         """从列表导入。"""
         self.clear()
         for item in data:
+            try:
+                fc = int(item.get("func_code", 0x03))
+            except (TypeError, ValueError):
+                fc = 0x03
             self.add(
                 name=item.get("name", ""),
                 address=item.get("address", 0),
                 reg_type=item.get("reg_type", "uint16"),
                 description=item.get("description", ""),
+                func_code=fc,
             )
 
 

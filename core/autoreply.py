@@ -3,10 +3,13 @@
 """
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from typing import Literal
 
 from .utils import text_to_bytes
+
+VALID_MATCH = ("exact", "contains", "prefix", "regex")
+VALID_REPLY_MODE = ("ascii", "hex")
 
 
 @dataclass
@@ -18,6 +21,45 @@ class ReplyRule:
     delay_ms: int = 0
     rate_limit_ms: int = 0
     enabled: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict, strict: bool = False) -> "ReplyRule":
+        """从 dict 构造；忽略未知键。strict=True 时对非法规则抛 ValueError。"""
+        known = {f.name for f in fields(cls)}
+        rule = cls(**{k: v for k, v in data.items() if k in known})
+        if strict:
+            ok, err = validate_rule(rule)
+            if not ok:
+                raise ValueError(err)
+        return rule
+
+
+def validate_rule(rule: ReplyRule) -> tuple[bool, str]:
+    """校验规则合法性，返回 (ok, error_message)。"""
+    if rule.match not in VALID_MATCH:
+        return False, f"invalid match: {rule.match}"
+    if rule.reply_mode not in VALID_REPLY_MODE:
+        return False, f"invalid reply_mode: {rule.reply_mode}"
+    try:
+        if int(rule.delay_ms) < 0 or int(rule.rate_limit_ms) < 0:
+            return False, "delay/rate must be >= 0"
+    except (TypeError, ValueError):
+        return False, "delay/rate must be integers"
+    if rule.match == "regex":
+        try:
+            re.compile(rule.pattern)
+        except re.error as e:
+            return False, f"invalid regex: {e}"
+    else:
+        try:
+            text_to_bytes(rule.pattern, rule.reply_mode)
+        except Exception as e:
+            return False, f"invalid pattern: {e}"
+    try:
+        text_to_bytes(rule.reply, rule.reply_mode)
+    except Exception as e:
+        return False, f"invalid reply: {e}"
+    return True, ""
 
 
 class AutoReplyEngine:

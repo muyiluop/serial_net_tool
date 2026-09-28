@@ -6,7 +6,6 @@
 from PySide6.QtWidgets import (
     QWidget,
     QGridLayout,
-    QVBoxLayout,
     QLineEdit,
     QComboBox,
     QSpinBox,
@@ -25,7 +24,6 @@ _SUMMARY_KEYS = {
     "tcp_server": ["port"],
     "udp": ["host", "port"],
     "mqtt": ["host", "port"],
-    "modbus": ["backend", "host", "port_tcp"],
 }
 
 def _ports() -> list:
@@ -46,7 +44,7 @@ class SessionConfigWidget(QWidget):
         self._port_combos: list[QComboBox] = []  # 需要热插拔刷新的端口下拉框
         self._build()
         # 串口类型：启动热插拔检测定时器
-        if kind in ("serial", "modbus"):
+        if kind == "serial":
             self._hotplug_timer = QTimer(self)
             self._hotplug_timer.timeout.connect(self._refresh_ports)
             self._hotplug_timer.start(2000)  # 每 2 秒检查一次
@@ -188,6 +186,9 @@ class SessionConfigWidget(QWidget):
                 order += [
                     ("local_port", self._spin("local_port", tr("local_port"), 0)),
                     ("broadcast", self._check("broadcast", tr("broadcast"))),
+                    ("multicast", self._check("multicast", tr("multicast"))),
+                    ("multicast_group", self._line("multicast_group", tr("multicast_group"), "239.0.0.1")),
+                    ("multicast_iface", self._line("multicast_iface", tr("multicast_iface"), "0.0.0.0")),
                 ]
             if k == "tcp_client":
                 order += self._pkt_reassembly_fields()
@@ -203,18 +204,6 @@ class SessionConfigWidget(QWidget):
                 ("password", self._line("password", tr("password"), "")),
                 ("keepalive", self._spin("keepalive", tr("keepalive"), 60, maximum=3600)),
                 ("use_tls", self._check("use_tls", tr("use_tls"))),
-                ("subscribes", self._multiline("subscribes", tr("mqtt_topics"), "sensor/#\ncmd/+/status")),
-            ]
-        elif k == "modbus":
-            order = [
-                ("backend", self._combo("backend", tr("backend"), ["rtu", "tcp"])),
-                ("port", self._port_combo("port", tr("serial_port_rtu"))),
-                ("baud", self._spin("baud", tr("baud_rtu"), 9600)),
-                ("parity", self._combo("parity", tr("parity_rtu"), ["N", "E", "O"])),
-                ("stopbits", self._combo("stopbits", tr("stopbits_rtu"), ["1", "2"])),
-                ("bytesize", self._combo("bytesize", tr("bytesize_rtu"), ["8", "7"])),
-                ("host", self._line("host", tr("host_tcp"), "127.0.0.1")),
-                ("port_tcp", self._spin("port_tcp", tr("port_tcp"), 502)),
             ]
 
         # 用 2 列网格紧凑排列：label+widget 为一组，两组一行
@@ -236,6 +225,17 @@ class SessionConfigWidget(QWidget):
                 grid.addWidget(w, row, col + 1)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
+
+        # UDP 组播：仅在启用时允许编辑组播地址/网卡
+        if self.kind == "udp" and "multicast" in self._widgets:
+            self._widgets["multicast"].toggled.connect(self._on_multicast_toggle)
+            self._on_multicast_toggle(self._widgets["multicast"].isChecked())
+
+    def _on_multicast_toggle(self, enabled: bool):
+        for key in ("multicast_group", "multicast_iface"):
+            w = self._widgets.get(key)
+            if w:
+                w.setEnabled(enabled)
 
     # ---------- 配置读写 ----------
     def get_config(self) -> dict:

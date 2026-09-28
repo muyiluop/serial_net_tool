@@ -14,8 +14,8 @@
   - 寄存器映射作为数据源
 """
 import struct
-from typing import Optional, Callable
-from PySide6.QtCore import QObject, Signal, QTimer, QByteArray
+from typing import Optional
+from PySide6.QtCore import QObject, Signal, QTimer
 
 from .frame import (
     build_rtu_request, build_rtu_response, build_rtu_exception,
@@ -26,7 +26,7 @@ from .frame import (
     make_write_multiple_regs_pdu, make_write_multiple_coils_pdu,
     parse_read_response, format_exception,
 )
-from .register_map import RegisterMap, reg_count_for_type
+from .register_map import RegisterMap
 
 
 class ModbusEngine(QObject):
@@ -134,9 +134,13 @@ class ModbusEngine(QObject):
         if len(self._rx_buffer) < 4:
             return 0
         data = bytes(self._rx_buffer)
-        # 尝试推断帧长度
-        func_code = data[1]
-        expected = _rtu_frame_length(func_code, data)
+        # 主站模式：优先依据待处理请求推导期望长度（比启发式更可靠）
+        expected = None
+        if self.mode == "master" and self._pending_request:
+            expected = self._expected_response_len(self._pending_request, data)
+        if expected is None:
+            # 兜底：根据功能码推断
+            expected = _rtu_frame_length(data[1], data)
         if expected is None:
             # 未知功能码，尝试逐字节跳过
             return 1
@@ -148,6 +152,23 @@ class ModbusEngine(QObject):
             return 1
         self._handle_frame(frame)
         return expected
+
+    @staticmethod
+    def _expected_response_len(req, data: bytes) -> Optional[int]:
+        """依据待处理请求推导 RTU 响应帧长度；无法确定时返回 None。"""
+        fc, _addr, _count = req
+        if len(data) < 3:
+            return None
+        if data[1] & 0x80:
+            # 异常响应：Slave + FC|0x80 + ExcCode + CRC
+            return 5
+        if fc in (0x01, 0x02, 0x03, 0x04):
+            # 读响应：Slave + FC + ByteCount + Data(N) + CRC
+            return 3 + data[2] + 2
+        if fc in (0x05, 0x06, 0x0F, 0x10):
+            # 写响应固定 8 字节
+            return 8
+        return None
 
     def _process_tcp_stream(self) -> int:
         """从 TCP 字节流中提取一帧，返回消耗的字节数。"""
@@ -232,9 +253,9 @@ class ModbusEngine(QObject):
         # 如果上一个请求还没收到响应，跳过本轮
         if self._pending_request:
             return
-        start_addr, count = self._poll_blocks[self._poll_index]
+        func_code, start_addr, count = self._poll_blocks[self._poll_index]
         self._poll_index = (self._poll_index + 1) % len(self._poll_blocks)
-        self._send_read(0x03, start_addr, count)
+        self._send_read(func_code, start_addr, count)
 
     # ==================== 主站：发送请求 ====================
 

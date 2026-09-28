@@ -1,0 +1,6 @@
+{
+  "name": "编解码工具 (Codec)",
+  "version": "1.0",
+  "author": "SerialNetTool",
+  "description": "Base64 / URL / JSON 编解码（window 型示例插件）"
+}
