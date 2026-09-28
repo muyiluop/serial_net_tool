@@ -94,8 +94,8 @@ class LogExportDialog(QDialog):
         self.cancel_btn = QPushButton(tr("cancel"))
         self.cancel_btn.setObjectName("ghost")
         btns.addStretch()
-        btns.addWidget(self.export_btn)
         btns.addWidget(self.cancel_btn)
+        btns.addWidget(self.export_btn)
         layout.addLayout(btns)
 
         # 信号

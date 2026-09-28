@@ -62,7 +62,7 @@ class MqttPanel(QWidget):
         self.sub_topic.setPlaceholderText("sensor/#")
         self.sub_qos = self._qos_combo()
         self.sub_add = QPushButton(tr("mqtt_add_sub"))
-        self.sub_add.setObjectName("ghost")
+        self.sub_add.setObjectName("secondary")
         self.sub_del = QPushButton(tr("mqtt_remove_sub"))
         self.sub_del.setObjectName("ghost")
         add_row.addWidget(self.sub_topic, 1)

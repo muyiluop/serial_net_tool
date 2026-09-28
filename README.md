@@ -14,6 +14,8 @@
 - **UDP**：单播 / 广播 / 组播（`IP_ADD_MEMBERSHIP`）。
 - **Modbus 插件**：复用串口/TCP 连接的主站/从站工具，寄存器映射、按功能码轮询（0x01/02/03/04）、帧解析视图、帧日志、异常码提示。
 - **插件框架**：可选 `plugin.json` manifest、Dock/窗口两种工具形态、崩溃隔离、启用/禁用持久化；内置 3 个插件示例。
+- **界面**：自绘 SVG 线性图标（随主题着色）、紧凑工程感（小圆角/低描边/高密度）、会话列表状态圆点、
+  下划线式 Tab、工具面板下拉导航、四档按钮层级。
 - **体验**：中/英文切换、深色（默认）/浅色/跟随系统主题（系统深浅色变化实时生效）、隐私优先（默认零遥测）。
 
 ## 安装
@@ -60,10 +62,11 @@ serial_net_tool/
     packet_reassembler.py 粘包重组（timeout/delimiter/length_prefix）
     config.py          配置持久化（JSON）
     i18n.py / theme.py 国际化 / 主题与设计令牌
+    icons.py           自绘 SVG 线性图标集（随主题着色）
     plugin_manager.py  插件发现与隔离（支持 plugin.json）
     telemetry.py       隐私遥测（默认关闭）
     utils.py           编码与字节工具
-  tools/               CRC / 校验和 / 进制计算
+  tools/               CRC / 校验和 / 进制计算 / gen_icon.py（生成多尺寸应用图标）
   ui/                  会话配置、收发面板、MQTT 面板、工具面板、日志导出、插件面板、设置
   plugins/             内置插件（modbus_tool / reverse / codec_tool）
   tests/               pytest 测试

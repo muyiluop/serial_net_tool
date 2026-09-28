@@ -74,15 +74,24 @@ def test_add_and_toggle_session(main_window, kind):
 
 
 def test_rename_keeps_icon(main_window):
-    from serial_net_tool.main_window import KIND_ICONS
-
+    """重命名后文本更新、类型图标保留（图标由 QListWidgetItem.setIcon 提供）。"""
     main_window._add_view({"id": "s1", "kind": "serial", "name": "orig", "cfg": {}})
     item = main_window.tree.item(0)
-    label = main_window._item_label("serial", "renamed")
-    assert label.startswith(KIND_ICONS["serial"])
-    assert "renamed" in label
+    assert not item.icon().isNull()          # 类型图标已设置
+    assert item.text() == "orig"
+
+    # 模拟重命名流程
+    view = main_window.views["s1"]
+    view.session["name"] = "renamed"
+    item.setText(main_window._item_label(view.session["kind"], "renamed"))
+    assert item.text() == "renamed"
+    assert not item.icon().isNull()          # 图标仍在
 
 
-def test_tools_panel_tabs_built(main_window):
-    # 右侧工具面板内置 Tab 已构建
-    assert main_window.tools.tabs.count() >= 6
+def test_tools_panel_pages_built(main_window):
+    # 右侧工具面板内置工具页已构建，且下拉导航可用
+    tools = main_window.tools
+    assert len(tools._pages) >= 6
+    assert tools.current_tool_name()  # 有默认选中项
+    # 插件页：内置插件（reverse 为 dock 型）已挂载
+    assert any(not builtin for _n, _w, builtin in tools._pages)

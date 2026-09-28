@@ -29,9 +29,12 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QFrame,
     QSizePolicy,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QRect
+from PySide6.QtGui import QColor, QPainter
 
 from .core.channel_factory import create_channel
 from .core.config import Config
@@ -39,7 +42,7 @@ from .core.autoreply import AutoReplyEngine
 from .core.plugin_manager import PluginManager
 from .core.i18n import tr
 from .core.telemetry import get_telemetry
-from .core.theme import status_colors, status_icon
+from .core.theme import status_colors, tokens, icon, icon_pixmap
 from .ui.session_config import SessionConfigWidget
 from .ui.recv_send import RecvSendWidget
 from .ui.mqtt_panel import MqttPanel
@@ -55,13 +58,77 @@ KIND_LABELS = {
     "udp": "udp",
     "mqtt": "mqtt",
 }
+# 会话类型 → 图标名（core/icons.py）
 KIND_ICONS = {
-    "serial": "🔌",
-    "tcp_client": "→",
-    "tcp_server": "←",
-    "udp": "📡",
-    "mqtt": "📶",
+    "serial": "serial",
+    "tcp_client": "tcp_client",
+    "tcp_server": "tcp_server",
+    "udp": "udp",
+    "mqtt": "mqtt",
 }
+
+# 菜单项 i18n key → 图标名
+MENU_ICONS = {
+    "import_config": "import",
+    "export_config": "export",
+    "settings": "settings",
+    "plugin_manager": "plugin",
+}
+
+# 会话项自定义数据角色
+ROLE_STATUS = Qt.UserRole + 1
+
+
+class SessionItemDelegate(QStyledItemDelegate):
+    """会话列表项：类型图标 + 文本 + 行尾状态圆点，扁平选中高亮。
+
+    自绘背景以摆脱 QSS 圆角方块：
+    - 选中：`sel_bg` 扁平底 + 左侧 2px 指示条
+    - 悬停：`sel_hover` 底
+    - 行尾 8px 圆点表示连接状态（颜色取 status_colors()）
+    """
+
+    BAR_W = 2
+    DOT_R = 3
+    DOT_GAP = 14
+
+    def paint(self, painter, option, index):
+        t = tokens()
+        rect = option.rect
+        selected = bool(option.state & QStyle.State_Selected)
+        hovered = bool(option.state & QStyle.State_MouseOver)
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        if selected:
+            painter.fillRect(rect, QColor(t["sel_bg"]))
+            painter.fillRect(
+                QRect(rect.left(), rect.top() + 3, self.BAR_W, rect.height() - 6),
+                QColor(t["sel_bar"]),
+            )
+        elif hovered:
+            painter.fillRect(rect, QColor(t["sel_hover"]))
+        painter.restore()
+
+        # 交给基类绘制图标与文字（去掉选中/悬停态，避免重复画底）
+        opt = QStyleOptionViewItem(option)
+        opt.rect = rect.adjusted(0, 0, -self.DOT_GAP, 0)
+        opt.state &= ~(QStyle.State_Selected | QStyle.State_MouseOver)
+        super().paint(painter, opt, index)
+
+        status = index.data(ROLE_STATUS)
+        if status:
+            colors = status_colors()
+            color = colors.get(status, colors["DISCONNECTED"])
+            cy = rect.center().y() + 1
+            cx = rect.right() - 11
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(QRect(cx - self.DOT_R, cy - self.DOT_R,
+                                      self.DOT_R * 2, self.DOT_R * 2))
+            painter.restore()
 
 
 class SessionView(QWidget):
@@ -83,6 +150,7 @@ class SessionView(QWidget):
 
         # 可折叠配置卡片
         self.cfg_section = CollapsibleSection(self._title(), collapsed=False)
+        self.cfg_section.set_leading_icon(icon_pixmap(self._kind_icon(), tokens()["text_dim"], 16))
         self.cfg_widget = SessionConfigWidget(self.session["kind"])
         if self.session.get("cfg"):
             self.cfg_widget.apply_config(self.session["cfg"])
@@ -93,7 +161,8 @@ class SessionView(QWidget):
         self.state_badge.setObjectName("badge_idle")
         self.toggle_btn = QPushButton(tr("open"))
         self.toggle_btn.setObjectName("accent")
-        self.toggle_btn.setFixedWidth(92)
+        self.toggle_btn.setIcon(icon("play", tokens()["accent_text"], 14))
+        self.toggle_btn.setMinimumWidth(84)
         self.toggle_btn.clicked.connect(self._on_toggle_clicked)
         # 阻止按钮点击触发折叠
         self.toggle_btn.setFocusPolicy(Qt.NoFocus)
@@ -116,9 +185,26 @@ class SessionView(QWidget):
         self.body = RecvSendWidget(self.autoreply, self.config, self.session["kind"])
         layout.addWidget(self.body, 1)
 
+    def _kind_icon(self) -> str:
+        return KIND_ICONS.get(self.session["kind"], "serial")
+
     def _title(self) -> str:
         kind = tr(KIND_LABELS.get(self.session["kind"], self.session["kind"]))
         return f"{self.session['name']}   [{kind}]"
+
+    def refresh_theme(self):
+        """主题切换后刷新本视图的动态图标。"""
+        self.cfg_section.set_leading_icon(icon_pixmap(self._kind_icon(), tokens()["text_dim"], 16))
+        self._apply_toggle_visual()
+        body = self.body
+        if hasattr(body, "refresh_theme"):
+            body.refresh_theme()
+
+    def _apply_toggle_visual(self):
+        """按连接状态更新“打开/关闭”按钮的文字与图标。"""
+        self.toggle_btn.setText(tr("close") if self.channel else tr("open"))
+        name = "stop" if self.channel else "play"
+        self.toggle_btn.setIcon(icon(name, tokens()["accent_text"], 14))
 
     def refresh_title(self):
         self.cfg_section.set_title(self._title())
@@ -148,7 +234,7 @@ class SessionView(QWidget):
         self.cfg_widget.set_enabled_all(False)
         self.cfg_section.set_collapsed(True)
         self.cfg_section.set_title(f"{self._title()}   —   {self.cfg_widget.summary()}")
-        self.toggle_btn.setText(tr("close"))
+        self._apply_toggle_visual()
 
     def close_channel(self):
         if self.channel:
@@ -165,7 +251,7 @@ class SessionView(QWidget):
         self.cfg_widget.set_enabled_all(True)
         self.cfg_section.set_collapsed(False)
         self.refresh_title()
-        self.toggle_btn.setText(tr("open"))
+        self._apply_toggle_visual()
         self.state_badge.setText(tr("disconnected"))
         self.state_badge.setObjectName("badge_idle")
         self._repolish(self.state_badge)
@@ -213,20 +299,31 @@ class MainWindow(QMainWindow):
     # ================= 构建 =================
     def _build_menus(self):
         mb = self.menuBar()
+        self._menu_icon_actions = []
         f = mb.addMenu(tr("menu_file"))
-        f.addAction(tr("import_config"), self._import_cfg)
-        f.addAction(tr("export_config"), self._export_cfg)
+        for key, slot in (("import_config", self._import_cfg), ("export_config", self._export_cfg)):
+            act = f.addAction(icon(MENU_ICONS[key], tokens()["text"], 14), tr(key), slot)
+            self._menu_icon_actions.append((act, MENU_ICONS[key]))
         f.addSeparator()
         f.addAction(tr("quit"), self.close)
         t = mb.addMenu(tr("menu_tools"))
-        t.addAction(tr("settings"), self._open_settings)
-        t.addAction(tr("plugin_manager"), self._open_plugins)
+        for key, slot in (("settings", self._open_settings), ("plugin_manager", self._open_plugins)):
+            act = t.addAction(icon(MENU_ICONS[key], tokens()["text"], 14), tr(key), slot)
+            self._menu_icon_actions.append((act, MENU_ICONS[key]))
         self._menu_ext = t
         self._build_ext_menu()
         v = mb.addMenu(tr("menu_view"))
         self._tools_toggle = v.addAction(tr("tools_panel"), self._toggle_tools)
         self._tools_toggle.setCheckable(True)
         self._tools_toggle.setChecked(True)
+
+    def _refresh_menu_icons(self):
+        """主题切换后刷新菜单项图标。"""
+        for act, name in getattr(self, "_menu_icon_actions", []):
+            try:
+                act.setIcon(icon(name, tokens()["text"], 14))
+            except RuntimeError:
+                pass
 
     def _build_ext_menu(self):
         """重建 Tools 菜单中的扩展工具项。"""
@@ -245,22 +342,27 @@ class MainWindow(QMainWindow):
                 self._ext_actions.append(act)
 
     def _build_central(self):
-        # 左侧会话侧边栏
+        # 左侧会话侧边栏（以背景分层，不用描边圆角卡片）
         sidebar = QFrame()
-        sidebar.setObjectName("card")
+        sidebar.setObjectName("panel")
         sidebar.setMaximumWidth(280)
         sidebar.setMinimumWidth(220)
         sb = QVBoxLayout(sidebar)
-        sb.setContentsMargins(8, 8, 8, 8)
+        sb.setContentsMargins(10, 10, 10, 10)
         sb.setSpacing(8)
 
         head = QHBoxLayout()
+        head.setSpacing(6)
+        head_icon = QLabel()
+        head_icon.setPixmap(icon_pixmap("list", tokens()["text_dim"], 16))
+        head.addWidget(head_icon)
         title = QLabel(tr("session_tree"))
         title.setObjectName("h1")
         head.addWidget(title)
         head.addStretch()
         self._new_btn = QPushButton(tr("add_session"))
-        self._new_btn.setObjectName("accent")
+        self._new_btn.setObjectName("secondary")
+        self._new_btn.setIcon(icon("add", tokens()["text"], 14))
         self._new_btn.clicked.connect(self._new_session)
         head.addWidget(self._new_btn)
         sb.addLayout(head)
@@ -273,12 +375,17 @@ class MainWindow(QMainWindow):
         # 长名称用省略号而非横向滚动条
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tree.setTextElideMode(Qt.ElideRight)
+        self.tree.setItemDelegate(SessionItemDelegate(self.tree))
+        self.tree.setUniformItemSizes(True)
+        self.tree.setSpacing(0)
+        self.tree.setFrameShape(QFrame.NoFrame)
         sb.addWidget(self.tree, 1)
 
         # 底部操作按钮：开/关 占满一行，重命名/删除 各占半
         ops1 = QHBoxLayout()
         ops1.setSpacing(6)
         self._open_btn = QPushButton(tr("toggle"))
+        self._open_btn.setObjectName("secondary")
         self._open_btn.setMinimumWidth(0)
         self._open_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._open_btn.clicked.connect(self.toggle_current)
@@ -289,10 +396,12 @@ class MainWindow(QMainWindow):
         ops2.setSpacing(6)
         self._rename_btn = QPushButton(tr("rename"))
         self._rename_btn.setObjectName("ghost")
+        self._rename_btn.setIcon(icon("rename", tokens()["text_dim"], 14))
         self._rename_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._rename_btn.clicked.connect(self._rename_current)
         self._del_btn = QPushButton(tr("delete"))
         self._del_btn.setObjectName("danger")
+        self._del_btn.setIcon(icon("clear", tokens()["err"], 14))
         self._del_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._del_btn.clicked.connect(self._delete_current)
         ops2.addWidget(self._rename_btn)
@@ -309,7 +418,7 @@ class MainWindow(QMainWindow):
         spl.setStretchFactor(1, 1)
         spl.setCollapsible(0, False)
         spl.setCollapsible(1, False)
-        spl.setSizes([220, 900])
+        spl.setSizes([240, 900])
         self.setCentralWidget(spl)
 
         # 空状态提示
@@ -317,6 +426,7 @@ class MainWindow(QMainWindow):
         self._empty.setObjectName("dim")
         self._empty.setAlignment(Qt.AlignCenter)
         self.stack.addWidget(self._empty)
+        self._refresh_open_btn()
 
     def _build_docks(self):
         self.tools = ToolsPanel(self.autoreply, self.config, self)
@@ -328,8 +438,11 @@ class MainWindow(QMainWindow):
         self.tools_dock.setObjectName("tools_dock")
         self.tools_dock.setWidget(self.tools)
         self.tools_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
-        self.tools_dock.setMinimumWidth(240)
-        self.tools_dock.setMaximumWidth(340)
+        self.tools_dock.setFeatures(
+            QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetClosable
+        )
+        self.tools_dock.setMinimumWidth(260)
+        self.tools_dock.setMaximumWidth(440)
         self.addDockWidget(Qt.RightDockWidgetArea, self.tools_dock)
         self.tools_dock.visibilityChanged.connect(self._on_dock_visibility)
 
@@ -369,48 +482,69 @@ class MainWindow(QMainWindow):
         self.status_lbl.setObjectName("dim")
         self.statusBar().addPermanentWidget(self.status_lbl)
         # 分隔符
-        sep1 = QLabel("│")
-        sep1.setObjectName("dim")
+        sep1 = QFrame()
+        sep1.setObjectName("vline")
+        sep1.setFixedWidth(1)
+        sep1.setFixedHeight(14)
         self.statusBar().addPermanentWidget(sep1)
         # 编码显示
         enc = self.config.get("default_encoding", "utf-8")
         self.enc_lbl = QLabel(f"ENC {enc}")
-        self.enc_lbl.setObjectName("stat")
+        self.enc_lbl.setObjectName("chip")
         self.statusBar().addPermanentWidget(self.enc_lbl)
-        sep2 = QLabel("│")
-        sep2.setObjectName("dim")
-        self.statusBar().addPermanentWidget(sep2)
         # 主题显示
         theme_name = self.config.get("theme", "dark")
-        self.theme_lbl = QLabel(f"theme: {tr(theme_name)}")
-        self.theme_lbl.setObjectName("stat")
+        self.theme_lbl = QLabel(f"{tr('theme')}: {tr(theme_name)}")
+        self.theme_lbl.setObjectName("chip")
         self.statusBar().addPermanentWidget(self.theme_lbl)
         self.statusBar().showMessage(tr("ready"))
 
     def refresh_theme(self):
-        """主题切换后重新刷新所有动态颜色。"""
-        # 刷新会话树状态色
+        """主题切换后重新刷新所有动态颜色与图标。"""
+        # 刷新会话树状态点与类型图标
         for i in range(self.tree.count()):
             it = self.tree.item(i)
             sid = it.data(Qt.UserRole)
             view = self.views.get(sid)
-            if view and view.channel:
-                self._set_item_status(it, view.channel.status.name)
-            else:
-                self._set_item_status(it, "DISCONNECTED")
-        # 重新渲染各会话日志（方向配色随主题变化）
+            status = view.channel.status.name if (view and view.channel) else "DISCONNECTED"
+            it.setData(ROLE_STATUS, status)
+            it.setIcon(icon(KIND_ICONS.get(it.data(Qt.UserRole + 2), "serial"), tokens()["text_dim"], 16))
+        self.tree.viewport().update()
+        # 刷新各会话视图的动态图标 + 重渲染日志（方向配色随主题变化）
         for view in self.views.values():
+            if hasattr(view, "refresh_theme"):
+                view.refresh_theme()
             body = getattr(view, "body", None)
             if hasattr(body, "_rerender"):
                 body._rerender()
-        # 刷新状态栏主题标签
+        # 刷新工具面板图标与状态栏标签
+        if hasattr(self.tools, "refresh_theme"):
+            self.tools.refresh_theme()
+        self._refresh_action_icons()
+        self._refresh_menu_icons()
         theme_name = self.config.get("theme", "dark")
-        self.theme_lbl.setText(f"theme: {tr(theme_name)}")
-        self._repolish(self.theme_lbl)
-        # 刷新编码标签
+        self.set_theme_label(theme_name)
         enc = self.config.get("default_encoding", "utf-8")
         self.enc_lbl.setText(f"ENC {enc}")
         self._repolish(self.enc_lbl)
+
+    def set_theme_label(self, theme_name: str):
+        """更新状态栏主题标签（供设置对话框即时预览同步）。"""
+        try:
+            self.theme_lbl.setText(f"{tr('theme')}: {tr(theme_name)}")
+            self._repolish(self.theme_lbl)
+        except RuntimeError:
+            pass
+
+    def _refresh_action_icons(self):
+        """按主题刷新侧边栏与菜单动作的图标。"""
+        for btn, name, color_key in (
+            (self._new_btn, "add", "text"),
+            (self._rename_btn, "rename", "text_dim"),
+            (self._del_btn, "clear", "err"),
+        ):
+            btn.setIcon(icon(name, tokens()[color_key], 14))
+        self._refresh_open_btn()
 
     def _toggle_tools(self):
         self.tools_dock.setVisible(not self.tools_dock.isVisible())
@@ -489,9 +623,8 @@ class MainWindow(QMainWindow):
             self._add_view(session)
 
     def _item_label(self, kind: str, name: str) -> str:
-        """会话列表项显示文本（含类型图标前缀）。"""
-        icon = KIND_ICONS.get(kind, "")
-        return f"{icon}  {name}" if icon else name
+        """会话列表项显示文本（图标由 QListWidgetItem.setIcon 提供）。"""
+        return name
 
     def _item_tooltip(self, kind: str, name: str) -> str:
         kind_label = tr(KIND_LABELS.get(kind, kind))
@@ -504,12 +637,15 @@ class MainWindow(QMainWindow):
         self.sessions.append(session)
         item = QListWidgetItem(self._item_label(session["kind"], session["name"]))
         item.setData(Qt.UserRole, session["id"])
+        item.setData(Qt.UserRole + 2, session["kind"])  # 类型（供主题刷新重建图标）
+        item.setIcon(icon(KIND_ICONS.get(session["kind"], "serial"), tokens()["text_dim"], 16))
         item.setToolTip(self._item_tooltip(session["kind"], session["name"]))
         self._set_item_status(item, "DISCONNECTED")
         self.tree.addItem(item)
         self.stack.addWidget(view)
         self.tree.setCurrentItem(item)
         self._update_empty_state()
+        self._refresh_open_btn()
         # 遥测：记录会话创建
         get_telemetry(self.config).record_session(session["kind"])
 
@@ -532,6 +668,7 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setText(tr("disconnected"))
                 self.status_lbl.setObjectName("dim")
                 self._repolish(self.status_lbl)
+        self._refresh_open_btn()
 
     def _on_context_menu(self, pos):
         item = self.tree.itemAt(pos)
@@ -541,10 +678,13 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         view, _ = self._current_view()
         is_open = bool(view and view.channel)
-        act_toggle = menu.addAction(tr("close") if is_open else tr("open"))
+        act_toggle = menu.addAction(
+            icon("stop" if is_open else "play", tokens()["text"], 14),
+            tr("close") if is_open else tr("open"),
+        )
         menu.addSeparator()
-        act_rename = menu.addAction(tr("rename"))
-        act_delete = menu.addAction(tr("delete"))
+        act_rename = menu.addAction(icon("rename", tokens()["text"], 14), tr("rename"))
+        act_delete = menu.addAction(icon("clear", tokens()["err"], 14), tr("delete"))
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen == act_toggle:
             self.toggle_current()
@@ -564,7 +704,8 @@ class MainWindow(QMainWindow):
             return
         if view.channel:
             view.close_channel()
-            self._refresh_item_color(sid, "DISCONNECTED")
+            self._refresh_item_status(sid, "DISCONNECTED")
+            self._refresh_open_btn()
             cur, _ = self._current_view()
             if cur is view:
                 self.status_lbl.setText(tr("disconnected"))
@@ -572,6 +713,7 @@ class MainWindow(QMainWindow):
                 self._repolish(self.status_lbl)
         else:
             view.open_channel(self)
+            self._refresh_open_btn()
 
     def _rename_current(self):
         view, item = self._current_view()
@@ -611,11 +753,13 @@ class MainWindow(QMainWindow):
         row = self.tree.row(item)
         self.tree.takeItem(row)
         self._update_empty_state()
+        self._refresh_open_btn()
 
     # ================= 状态反馈 =================
     def _on_status(self, view, status):
         view.set_status_badge(status)
-        self._refresh_item_color(view.session["id"], status.name)
+        self._refresh_item_status(view.session["id"], status.name)
+        self._refresh_open_btn()
         cur, _ = self._current_view()
         if cur is view:
             self.status_lbl.setText(status.label)
@@ -628,10 +772,17 @@ class MainWindow(QMainWindow):
             self.status_lbl.setObjectName(obj)
             self._repolish(self.status_lbl)
 
+    def _refresh_open_btn(self):
+        """侧边栏“打开/关闭”按钮随当前会话状态更新图标与文字。"""
+        view, _ = self._current_view()
+        is_open = bool(view and view.channel)
+        self._open_btn.setText(tr("close") if is_open else tr("toggle"))
+        self._open_btn.setIcon(icon("stop" if is_open else "play", tokens()["text"], 14))
+
     def _on_error(self, msg):
         self.statusBar().showMessage(tr("error_msg").format(msg), 5000)
 
-    def _refresh_item_color(self, sid, status_name):
+    def _refresh_item_status(self, sid, status_name):
         for i in range(self.tree.count()):
             it = self.tree.item(i)
             if it.data(Qt.UserRole) == sid:
@@ -639,10 +790,9 @@ class MainWindow(QMainWindow):
                 break
 
     def _set_item_status(self, item, status_name):
-        """会话项状态可视化：彩色圆点图标 + 文字状态色。"""
-        colors = status_colors()
-        item.setForeground(QColor(colors.get(status_name, colors["DISCONNECTED"])))
-        item.setIcon(status_icon(status_name))
+        """会话项状态可视化：由 delegate 在行尾绘制状态圆点。"""
+        item.setData(ROLE_STATUS, status_name)
+        self.tree.viewport().update()
 
     def _update_empty_state(self):
         has = self.tree.count() > 0

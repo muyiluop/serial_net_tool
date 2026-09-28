@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QFileDialog,
     QMessageBox,
-    QToolButton,
 )
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor, QShortcut, QKeySequence
@@ -34,7 +33,7 @@ from ..core.utils import text_to_bytes, bytes_to_text
 from ..core.autoreply import AutoReplyEngine
 from ..core.config import Config
 from ..core.log_store import LogStore
-from ..core.theme import direction_colors, tokens
+from ..core.theme import direction_colors, tokens, icon
 from ..core.i18n import tr
 from .log_export_dialog import LogExportDialog
 
@@ -106,20 +105,6 @@ class RecvSendWidget(QWidget):
         self.autoscroll_chk.setChecked(True)
         bar1.addWidget(self.autoscroll_chk)
 
-        self.wrap_chk = QCheckBox(tr("log_wrap"))
-        self.wrap_chk.setChecked(bool(self.config.get("log_wrap", True)))
-        self.wrap_chk.toggled.connect(self._on_wrap_toggled)
-        bar1.addWidget(self.wrap_chk)
-
-        bar1.addWidget(self._mk_label(tr("log_max_lines")))
-        self.max_lines = QSpinBox()
-        self.max_lines.setRange(100, 200000)
-        self.max_lines.setSingleStep(500)
-        self.max_lines.setValue(int(self.config.get("log_max_lines", _DEFAULT_MAX_LINES)))
-        self.max_lines.setFixedWidth(96)
-        self.max_lines.valueChanged.connect(self._on_max_lines_changed)
-        bar1.addWidget(self.max_lines)
-
         bar1.addWidget(self._mk_label(tr("log_filter")))
         self.filter_cb = QComboBox()
         self.filter_cb.addItem(tr("log_filter_all"), "both")
@@ -128,24 +113,25 @@ class RecvSendWidget(QWidget):
         idx = self.filter_cb.findData(self.config.get("log_filter_dir", "both"))
         self.filter_cb.setCurrentIndex(max(0, idx))
         self.filter_cb.currentIndexChanged.connect(self._on_filter_changed)
+        self.filter_cb.setMaximumWidth(120)
         bar1.addWidget(self.filter_cb)
 
         bar1.addStretch()
-        self.clear_btn = self._mk_btn(tr("clear"), ghost=True)
-        self.export_btn = self._mk_btn(tr("export_log"), ghost=True)
+        self.pause_btn = QPushButton(tr("log_pause"))
+        self.pause_btn.setObjectName("secondary")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.setIcon(icon("pause", tokens()["text"], 14))
+        self.pause_btn.toggled.connect(self._on_pause_toggled)
+        bar1.addWidget(self.pause_btn)
+        # 清空/导出用图标按钮，窄宽度下不占文字空间
+        self.clear_btn = self._mk_icon_btn("clear", tr("clear"))
+        self.export_btn = self._mk_icon_btn("export", tr("export_log"))
         bar1.addWidget(self.clear_btn)
         bar1.addWidget(self.export_btn)
         layout.addLayout(bar1)
 
         bar2 = QHBoxLayout()
         bar2.setSpacing(6)
-        self.pause_btn = QToolButton()
-        self.pause_btn.setObjectName("tool")
-        self.pause_btn.setCheckable(True)
-        self.pause_btn.setText(tr("log_pause"))
-        self.pause_btn.toggled.connect(self._on_pause_toggled)
-        bar2.addWidget(self.pause_btn)
-
         self.search_in = QLineEdit()
         self.search_in.setPlaceholderText(tr("log_search"))
         self.search_in.setClearButtonEnabled(True)
@@ -154,15 +140,30 @@ class RecvSendWidget(QWidget):
         self.search_in.returnPressed.connect(self._search_next)
         bar2.addWidget(self.search_in, 1)
 
-        self.search_prev_btn = self._mk_btn(tr("log_search_prev"), ghost=True)
-        self.search_next_btn = self._mk_btn(tr("log_search_next"), ghost=True)
+        self.search_prev_btn = self._mk_icon_btn("chevron_up", tr("log_search_prev"))
+        self.search_next_btn = self._mk_icon_btn("chevron_down", tr("log_search_next"))
         self.search_prev_btn.clicked.connect(self._search_prev)
         self.search_next_btn.clicked.connect(self._search_next)
         bar2.addWidget(self.search_prev_btn)
         bar2.addWidget(self.search_next_btn)
 
+        bar2.addStretch()
+        self.wrap_chk = QCheckBox(tr("log_wrap"))
+        self.wrap_chk.setChecked(bool(self.config.get("log_wrap", True)))
+        self.wrap_chk.toggled.connect(self._on_wrap_toggled)
+        bar2.addWidget(self.wrap_chk)
+
+        bar2.addWidget(self._mk_label(tr("log_max_lines")))
+        self.max_lines = QSpinBox()
+        self.max_lines.setRange(100, 200000)
+        self.max_lines.setSingleStep(500)
+        self.max_lines.setValue(int(self.config.get("log_max_lines", _DEFAULT_MAX_LINES)))
+        self.max_lines.setFixedWidth(92)
+        self.max_lines.valueChanged.connect(self._on_max_lines_changed)
+        bar2.addWidget(self.max_lines)
+
         self.stat = QLabel("RX 0  ·  TX 0")
-        self.stat.setObjectName("stat")
+        self.stat.setObjectName("mono")
         bar2.addWidget(self.stat)
         layout.addLayout(bar2)
 
@@ -221,11 +222,12 @@ class RecvSendWidget(QWidget):
         sctrl.addWidget(self.peer_cb)
 
         sctrl.addStretch()
-        self.file_btn = self._mk_btn(tr("select_file"), ghost=True)
+        self.file_btn = self._mk_btn(tr("select_file"), ghost=True, icon_name="file")
         self.file_btn.setEnabled(False)
         sctrl.addWidget(self.file_btn)
-        self.send_btn = self._mk_btn(tr("send"), accent=True)
-        self.send_btn.setMinimumWidth(110)
+        self.send_btn = self._mk_btn(tr("send"), accent=True, icon_name="send",
+                                     icon_color_key="accent_text")
+        self.send_btn.setMinimumWidth(96)
         self.send_btn.setEnabled(False)
         sctrl.addWidget(self.send_btn)
         send_v.addLayout(sctrl)
@@ -258,11 +260,13 @@ class RecvSendWidget(QWidget):
         self.chunk_delay.setFixedWidth(90)
         fr_layout.addWidget(self.chunk_delay)
 
-        self.file_send_btn = self._mk_btn(tr("start_file_send"), accent=True)
+        self.file_send_btn = self._mk_btn(
+            tr("start_file_send"), accent=True, icon_name="play", icon_color_key="accent_text"
+        )
         self.file_send_btn.setVisible(False)
         fr_layout.addWidget(self.file_send_btn)
 
-        self.file_cancel_btn = self._mk_btn(tr("cancel"), ghost=True)
+        self.file_cancel_btn = self._mk_btn(tr("cancel"), ghost=True, icon_name="stop")
         self.file_cancel_btn.setVisible(False)
         fr_layout.addWidget(self.file_cancel_btn)
 
@@ -296,15 +300,34 @@ class RecvSendWidget(QWidget):
         lab.setObjectName("dim")
         return lab
 
-    def _mk_btn(self, text: str, ghost: bool = False, accent: bool = False) -> QPushButton:
+    def _mk_btn(
+        self,
+        text: str,
+        ghost: bool = False,
+        accent: bool = False,
+        icon_name: str = "",
+        icon_color_key: str = "text",
+    ) -> QPushButton:
         b = QPushButton(text)
         if accent:
             b.setObjectName("accent")
         elif ghost:
             b.setObjectName("ghost")
+        if icon_name:
+            b.setIcon(icon(icon_name, tokens()[icon_color_key], 14))
         # 保证按钮文字完整显示：每字约 14px + padding 34px，最少 64px
         min_w = max(64, len(text) * 14 + 34)
         b.setMinimumWidth(min_w)
+        return b
+
+    def _mk_icon_btn(self, icon_name: str, tooltip: str = "") -> QPushButton:
+        """仅图标的小按钮（用于紧凑工具条）。"""
+        b = QPushButton()
+        b.setObjectName("ghost")
+        b.setIcon(icon(icon_name, tokens()["text_dim"], 14))
+        b.setFixedSize(28, 26)
+        if tooltip:
+            b.setToolTip(tooltip)
         return b
 
     def _vline(self) -> QFrame:
@@ -449,11 +472,26 @@ class RecvSendWidget(QWidget):
 
     def _on_pause_toggled(self, paused):
         self.pause_btn.setText(tr("log_resume") if paused else tr("log_pause"))
+        self.pause_btn.setIcon(icon("play" if paused else "pause", tokens()["text"], 14))
         if not paused:
             self._pending_since_pause = 0
             self._rerender()
         else:
             self._update_stat()
+
+    def refresh_theme(self):
+        """主题切换后刷新工具条图标（文字色随主题变化）。"""
+        self.clear_btn.setIcon(icon("clear", tokens()["text_dim"], 14))
+        self.export_btn.setIcon(icon("export", tokens()["text_dim"], 14))
+        self.file_btn.setIcon(icon("file", tokens()["text"], 14))
+        self.send_btn.setIcon(icon("send", tokens()["accent_text"], 14))
+        self.pause_btn.setIcon(
+            icon("play" if self.pause_btn.isChecked() else "pause", tokens()["text"], 14)
+        )
+        self.search_prev_btn.setIcon(icon("chevron_up", tokens()["text_dim"], 14))
+        self.search_next_btn.setIcon(icon("chevron_down", tokens()["text_dim"], 14))
+        self.file_send_btn.setIcon(icon("play", tokens()["accent_text"], 14))
+        self.file_cancel_btn.setIcon(icon("stop", tokens()["text"], 14))
 
     # ================= 搜索 =================
     def _apply_search(self):

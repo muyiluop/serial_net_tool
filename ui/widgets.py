@@ -51,8 +51,12 @@ class CollapsibleSection(QWidget):
         self._arrow = QLabel("▸" if collapsed else "▾")
         self._arrow.setObjectName("arrow")
         self._arrow.setFixedWidth(12)
+        self._icon = QLabel()
+        self._icon.setObjectName("dim")
+        self._icon.setVisible(False)
         self._title = QLabel(title)
         self._title.setObjectName("h1")
+        h.addWidget(self._icon)
         h.addWidget(self._arrow)
         h.addWidget(self._title)
         h.addStretch()
@@ -73,6 +77,11 @@ class CollapsibleSection(QWidget):
     def add_header_widget(self, w: QWidget):
         """在标题栏右侧追加控件（如按钮）。"""
         self._header_btns.addWidget(w)
+
+    def set_leading_icon(self, pixmap):
+        """设置标题左侧的引导图标（传空 pixmap 则隐藏）。"""
+        self._icon.setPixmap(pixmap)
+        self._icon.setVisible(pixmap is not None and not pixmap.isNull())
 
     def content_layout(self) -> QVBoxLayout:
         return self._content_layout

@@ -1,18 +1,23 @@
-"""会话配置表单：按会话类型动态生成字段，采用紧凑网格布局。
+"""会话配置表单：按会话类型动态生成字段。
 
-相比旧版 QFormLayout 单列平铺，这里用 2 列网格排列，显著降低纵向占用；
-并提供 summary() 生成一行配置摘要，便于折叠时快速了解当前连接参数。
+布局规范（紧凑工程感）：
+- 字段采用「上标签（11.5px 次要色）+ 下控件」的堆叠块，两列网格排列；
+  避免旧版「左标签 + 右控件」在宽度变化时标签列不齐、控件被拉伸的问题。
+- 控件宽度限制在 110–220px，不再无限拉伸。
+- 复选框统一收进一个「流控 / 选项」分组，避免跨列错位。
+- summary() 生成一行配置摘要（串口用 8N1 记法），便于折叠时快速了解参数。
 """
 from PySide6.QtWidgets import (
     QWidget,
     QGridLayout,
+    QVBoxLayout,
+    QHBoxLayout,
     QLineEdit,
     QComboBox,
     QSpinBox,
     QCheckBox,
+    QGroupBox,
     QLabel,
-    QPlainTextEdit,
-    QSizePolicy,
 )
 from PySide6.QtCore import QTimer
 from ..core.i18n import tr
@@ -25,6 +30,11 @@ _SUMMARY_KEYS = {
     "udp": ["host", "port"],
     "mqtt": ["host", "port"],
 }
+
+# 控件尺寸约束
+_CTRL_MIN_W = 110
+_CTRL_MAX_W = 220
+
 
 def _ports() -> list:
     try:
@@ -59,11 +69,9 @@ class SessionConfigWidget(QWidget):
             old_items = [cb.itemText(i) for i in range(cb.count())]
             if set(ports) == set(old_items):
                 continue  # 没有变化
-            # 记住当前选择
             cb.clear()
             cb.addItems(ports)
             cb.setEditable(True)
-            # 恢复选择（如果仍然存在）
             idx = cb.findText(current)
             if idx >= 0:
                 cb.setCurrentIndex(idx)
@@ -71,79 +79,62 @@ class SessionConfigWidget(QWidget):
                 cb.setCurrentText(current)
 
     # ---------- 字段构造 ----------
-    def _add(self, key: str, label: str, widget: QWidget):
+    def _register(self, key: str, label: str, widget: QWidget) -> tuple:
+        """登记字段并返回条目 (key, label, widget)。"""
+        widget.setMinimumWidth(_CTRL_MIN_W)
+        widget.setMaximumWidth(_CTRL_MAX_W)
         self._widgets[key] = widget
         self._labels[key] = label
+        return (key, label, widget)
 
-    def _combo(self, key, label, items, editable=False):
+    def _combo(self, items, editable=False) -> QComboBox:
         cb = QComboBox()
         cb.addItems(items)
         cb.setEditable(editable)
-        cb.setMinimumWidth(90)
-        self._add(key, label, cb)
         return cb
 
-    def _port_combo(self, key, label):
-        """专用方法：创建端口下拉框并注册到热插拔刷新列表。"""
-        cb = self._combo(key, label, _ports(), editable=True)
+    def _port_combo(self) -> QComboBox:
+        """端口下拉框（注册到热插拔刷新列表）。"""
+        cb = self._combo(_ports(), editable=True)
         self._port_combos.append(cb)
         return cb
 
-    def _line(self, key, label, placeholder=""):
+    def _line(self, placeholder="") -> QLineEdit:
         le = QLineEdit()
         le.setPlaceholderText(placeholder)
-        le.setMinimumWidth(90)
-        self._add(key, label, le)
         return le
 
-    def _multiline(self, key, label, placeholder=""):
-        """多行文本编辑器（用于 MQTT 订阅主题列表等）。"""
-        te = QPlainTextEdit()
-        te.setPlaceholderText(placeholder)
-        te.setMaximumHeight(60)
-        self._add(key, label, te)
-        return te
-
-    def _spin(self, key, label, default, maximum=65535):
+    def _spin(self, default, maximum=65535) -> QSpinBox:
         sb = QSpinBox()
         sb.setMaximum(maximum)
         sb.setValue(default)
-        sb.setMinimumWidth(70)
-        self._add(key, label, sb)
         return sb
 
-    def _check(self, key, label):
-        c = QCheckBox(label)
-        self._add(key, label, c)
-        return c
+    @staticmethod
+    def _check(label) -> QCheckBox:
+        return QCheckBox(label)
 
     def _pkt_reassembly_fields(self) -> list:
         """粘包重组配置字段。"""
-        pkt_mode = self._combo("pkt_mode", tr("pkt_mode"), ["none", "timeout", "delimiter", "length_prefix"])
-        pkt_idle = self._spin("pkt_idle_ms", tr("pkt_idle_ms"), 50, maximum=10000)
-        pkt_delim = self._line("pkt_delimiter", tr("pkt_delimiter"), "0D 0A")
-        pkt_keep = self._check("pkt_keep_delimiter", tr("pkt_keep_delimiter"))
-        pkt_len_bytes = self._combo("pkt_len_bytes", tr("pkt_len_bytes"), ["1", "2", "4"])
-        pkt_len_endian = self._combo("pkt_len_endian", tr("pkt_len_endian"), ["big", "little"])
-        pkt_len_incl = self._check("pkt_len_includes_header", tr("pkt_len_includes_header"))
-        # 默认隐藏非 none 模式的参数
-        pkt_idle.setEnabled(False)
-        pkt_delim.setEnabled(False)
-        pkt_keep.setEnabled(False)
-        pkt_len_bytes.setEnabled(False)
-        pkt_len_endian.setEnabled(False)
-        pkt_len_incl.setEnabled(False)
-        pkt_mode.currentTextChanged.connect(
-            lambda mode: self._on_pkt_mode_change(mode)
-        )
+        pkt_mode = self._combo(["none", "timeout", "delimiter", "length_prefix"])
+        pkt_idle = self._spin(50, maximum=10000)
+        pkt_delim = self._line("0D 0A")
+        pkt_keep = self._check(tr("pkt_keep_delimiter"))
+        pkt_len_bytes = self._combo(["1", "2", "4"])
+        pkt_len_endian = self._combo(["big", "little"])
+        pkt_len_incl = self._check(tr("pkt_len_includes_header"))
+        # 默认禁用非 none 模式的参数
+        for w in (pkt_idle, pkt_delim, pkt_keep, pkt_len_bytes, pkt_len_endian, pkt_len_incl):
+            w.setEnabled(False)
+        pkt_mode.currentTextChanged.connect(self._on_pkt_mode_change)
         return [
-            ("pkt_mode", pkt_mode),
-            ("pkt_idle_ms", pkt_idle),
-            ("pkt_delimiter", pkt_delim),
-            ("pkt_keep_delimiter", pkt_keep),
-            ("pkt_len_bytes", pkt_len_bytes),
-            ("pkt_len_endian", pkt_len_endian),
-            ("pkt_len_includes_header", pkt_len_incl),
+            self._register("pkt_mode", tr("pkt_mode"), pkt_mode),
+            self._register("pkt_idle_ms", tr("pkt_idle_ms"), pkt_idle),
+            self._register("pkt_delimiter", tr("pkt_delimiter"), pkt_delim),
+            self._register("pkt_keep_delimiter", "", pkt_keep),
+            self._register("pkt_len_bytes", tr("pkt_len_bytes"), pkt_len_bytes),
+            self._register("pkt_len_endian", tr("pkt_len_endian"), pkt_len_endian),
+            self._register("pkt_len_includes_header", "", pkt_len_incl),
         ]
 
     def _on_pkt_mode_change(self, mode: str):
@@ -164,72 +155,95 @@ class SessionConfigWidget(QWidget):
                 w.setEnabled(enabled)
 
     def _build(self):
-        # 先按类型创建字段（顺序即展示顺序）
         k = self.kind
-        order: list = []
+        items: list = []
+        checks_title = tr("options")
+
         if k == "serial":
-            order = [
-                ("port", self._port_combo("port", tr("port"))),
-                ("baud", self._combo("baud", tr("baud"), ["9600", "19200", "38400", "57600", "115200"], editable=True)),
-                ("bytesize", self._combo("bytesize", tr("bytesize"), ["8", "7", "6", "5"])),
-                ("parity", self._combo("parity", tr("parity"), ["N", "E", "O", "M", "S"])),
-                ("stopbits", self._combo("stopbits", tr("stopbits"), ["1", "1.5", "2"])),
-                ("xonxoff", self._check("xonxoff", "XON/XOFF")),
-                ("rtscts", self._check("rtscts", "RTS/CTS")),
+            checks_title = tr("flow_control")
+            items = [
+                self._register("port", tr("port"), self._port_combo()),
+                self._register("baud", tr("baud"),
+                               self._combo(["9600", "19200", "38400", "57600", "115200"], editable=True)),
+                self._register("bytesize", tr("bytesize"), self._combo(["8", "7", "6", "5"])),
+                self._register("parity", tr("parity"), self._combo(["N", "E", "O", "M", "S"])),
+                self._register("stopbits", tr("stopbits"), self._combo(["1", "1.5", "2"])),
+                self._register("xonxoff", "XON/XOFF", self._check("XON/XOFF")),
+                self._register("rtscts", "RTS/CTS", self._check("RTS/CTS")),
             ]
         elif k in ("tcp_client", "udp"):
-            order = [
-                ("host", self._line("host", tr("host"), "127.0.0.1")),
-                ("port", self._spin("port", tr("port"), 8080)),
+            items = [
+                self._register("host", tr("host"), self._line("127.0.0.1")),
+                self._register("port", tr("port"), self._spin(8080)),
             ]
             if k == "udp":
-                order += [
-                    ("local_port", self._spin("local_port", tr("local_port"), 0)),
-                    ("broadcast", self._check("broadcast", tr("broadcast"))),
-                    ("multicast", self._check("multicast", tr("multicast"))),
-                    ("multicast_group", self._line("multicast_group", tr("multicast_group"), "239.0.0.1")),
-                    ("multicast_iface", self._line("multicast_iface", tr("multicast_iface"), "0.0.0.0")),
+                items += [
+                    self._register("local_port", tr("local_port"), self._spin(0)),
+                    self._register("broadcast", tr("broadcast"), self._check(tr("broadcast"))),
+                    self._register("multicast", tr("multicast"), self._check(tr("multicast"))),
+                    self._register("multicast_group", tr("multicast_group"),
+                                   self._line("239.0.0.1")),
+                    self._register("multicast_iface", tr("multicast_iface"),
+                                   self._line("0.0.0.0")),
                 ]
             if k == "tcp_client":
-                order += self._pkt_reassembly_fields()
+                items += self._pkt_reassembly_fields()
         elif k == "tcp_server":
-            order = [("port", self._spin("port", tr("listen_port"), 8080))]
-            order += self._pkt_reassembly_fields()
+            items = [self._register("port", tr("listen_port"), self._spin(8080))]
+            items += self._pkt_reassembly_fields()
         elif k == "mqtt":
-            order = [
-                ("host", self._line("host", tr("broker_addr"), "test.mosquitto.org")),
-                ("port", self._spin("port", tr("port"), 1883)),
-                ("client_id", self._line("client_id", tr("client_id"), "serial_net_tool")),
-                ("username", self._line("username", tr("username"), "")),
-                ("password", self._line("password", tr("password"), "")),
-                ("keepalive", self._spin("keepalive", tr("keepalive"), 60, maximum=3600)),
-                ("use_tls", self._check("use_tls", tr("use_tls"))),
+            items = [
+                self._register("host", tr("broker_addr"), self._line("test.mosquitto.org")),
+                self._register("port", tr("port"), self._spin(1883)),
+                self._register("client_id", tr("client_id"), self._line("serial_net_tool")),
+                self._register("username", tr("username"), self._line("")),
+                self._register("password", tr("password"), self._line("")),
+                self._register("keepalive", tr("keepalive"), self._spin(60, maximum=3600)),
+                self._register("use_tls", tr("use_tls"), self._check(tr("use_tls"))),
             ]
 
-        # 用 2 列网格紧凑排列：label+widget 为一组，两组一行
+        fields = [(key, label, w) for key, label, w in items if not isinstance(w, QCheckBox)]
+        checks = [(key, w) for key, _label, w in items if isinstance(w, QCheckBox)]
+
+        # 两列网格：每列为「上标签 + 下控件」的字段块
         grid = QGridLayout(self)
         grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(10)
         grid.setContentsMargins(2, 2, 2, 2)
-        col_pairs = 2
-        for i, (key, w) in enumerate(order):
-            row = i // col_pairs
-            col = (i % col_pairs) * 2
-            if isinstance(w, QCheckBox):
-                grid.addWidget(w, row, col, 1, 2)
-            else:
-                lab = QLabel(self._labels[key])
-                lab.setObjectName("dim")
-                lab.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-                grid.addWidget(lab, row, col)
-                grid.addWidget(w, row, col + 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
+        cols = 2
+        for i, (_key, label, widget) in enumerate(fields):
+            row, col = divmod(i, cols)
+            grid.addWidget(self._field_block(label, widget), row, col)
+        for c in range(cols):
+            grid.setColumnStretch(c, 1)
+
+        # 复选框收进分组，整行排列
+        if checks:
+            row = (len(fields) + cols - 1) // cols
+            group = QGroupBox(checks_title)
+            h = QHBoxLayout(group)
+            h.setSpacing(14)
+            for _key, cb in checks:
+                h.addWidget(cb)
+            h.addStretch()
+            grid.addWidget(group, row, 0, 1, cols)
 
         # UDP 组播：仅在启用时允许编辑组播地址/网卡
-        if self.kind == "udp" and "multicast" in self._widgets:
+        if k == "udp" and "multicast" in self._widgets:
             self._widgets["multicast"].toggled.connect(self._on_multicast_toggle)
             self._on_multicast_toggle(self._widgets["multicast"].isChecked())
+
+    def _field_block(self, label: str, widget: QWidget) -> QWidget:
+        """包装为「上标签 + 下控件」的字段块。"""
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        lab = QLabel(label)
+        lab.setObjectName("h2")
+        v.addWidget(lab)
+        v.addWidget(widget)
+        return box
 
     def _on_multicast_toggle(self, enabled: bool):
         for key in ("multicast_group", "multicast_iface"):
@@ -245,8 +259,6 @@ class SessionConfigWidget(QWidget):
                 cfg[key] = w.currentText()
             elif isinstance(w, QLineEdit):
                 cfg[key] = w.text()
-            elif isinstance(w, QPlainTextEdit):
-                cfg[key] = w.toPlainText()
             elif isinstance(w, QSpinBox):
                 cfg[key] = w.value()
             elif isinstance(w, QCheckBox):
@@ -266,8 +278,6 @@ class SessionConfigWidget(QWidget):
                     w.setCurrentText(str(val))
             elif isinstance(w, QLineEdit):
                 w.setText(str(val))
-            elif isinstance(w, QPlainTextEdit):
-                w.setPlainText(str(val))
             elif isinstance(w, QSpinBox):
                 try:
                     w.setValue(int(val))
@@ -291,6 +301,19 @@ class SessionConfigWidget(QWidget):
     def summary(self) -> str:
         """生成一行配置摘要，用于折叠时显示。"""
         cfg = self.get_config()
+        if self.kind == "serial":
+            frame = (
+                f"{cfg.get('bytesize', '8')}"
+                f"{cfg.get('parity', 'N')}"
+                f"{cfg.get('stopbits', '1')}"
+            )
+            parts = [cfg.get("port", ""), cfg.get("baud", ""), frame]
+            if cfg.get("xonxoff"):
+                parts.append("XON")
+            if cfg.get("rtscts"):
+                parts.append("RTS")
+            text = " · ".join(str(p) for p in parts if p not in (None, ""))
+            return text or tr("not_configured")
         keys = _SUMMARY_KEYS.get(self.kind, [])
         parts = []
         for key in keys:

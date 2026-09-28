@@ -243,9 +243,9 @@ class ModbusToolWidget(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
         self.add_btn = QPushButton(tr("add"))
-        self.add_btn.setObjectName("accent")
+        self.add_btn.setObjectName("secondary")
         self.del_btn = QPushButton(tr("delete_selected"))
-        self.del_btn.setObjectName("ghost")
+        self.del_btn.setObjectName("danger")
         toolbar.addWidget(self.add_btn)
         toolbar.addWidget(self.del_btn)
         toolbar.addStretch()
@@ -275,6 +275,7 @@ class ModbusToolWidget(QWidget):
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         self.cfg_table.setMinimumHeight(120)
         self.cfg_table.setMaximumHeight(400)
+        self.cfg_table.verticalHeader().setDefaultSectionSize(28)
         layout.addWidget(self.cfg_table, 1)
 
         # 设值行
@@ -286,7 +287,7 @@ class ModbusToolWidget(QWidget):
         self.val_spin = QSpinBox()
         self.val_spin.setRange(0, 65535)
         self.set_val_btn = QPushButton(tr("mb_set_value"))
-        self.set_val_btn.setObjectName("ghost")
+        self.set_val_btn.setObjectName("secondary")
         val_row.addWidget(self.val_addr)
         val_row.addWidget(self.val_spin)
         val_row.addWidget(self.set_val_btn)
@@ -305,6 +306,8 @@ class ModbusToolWidget(QWidget):
             [tr("name"), tr("address"), tr("mb_reg_type"), tr("value")]
         )
         self.data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.data_table.setObjectName("mono")
+        self.data_table.verticalHeader().setDefaultSectionSize(26)
         self.data_table.setMinimumHeight(200)
         layout.addWidget(self.data_table)
         return w
@@ -325,7 +328,7 @@ class ModbusToolWidget(QWidget):
         self.parse_fmt.setMinimumWidth(90)
         top.addWidget(self.parse_fmt)
         self.parse_btn = QPushButton(tr("mb_parse_btn"))
-        self.parse_btn.setObjectName("accent")
+        self.parse_btn.setObjectName("secondary")
         top.addWidget(self.parse_btn)
         top.addStretch()
         layout.addLayout(top)
@@ -342,7 +345,9 @@ class ModbusToolWidget(QWidget):
             tr("mb_col_qty"), tr("mb_col_values"), tr("mb_col_exception"),
         ])
         self.parse_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.parse_table.setObjectName("mono")
         self.parse_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.parse_table.verticalHeader().setDefaultSectionSize(26)
         layout.addWidget(self.parse_table, 1)
 
         self.parse_btn.clicked.connect(self._on_parse)
@@ -390,6 +395,7 @@ class ModbusToolWidget(QWidget):
         layout = QVBoxLayout(w)
         layout.setSpacing(6)
         self.frame_log = QPlainTextEdit()
+        self.frame_log.setObjectName("mono")
         self.frame_log.setReadOnly(True)
         self.frame_log.setMinimumHeight(200)
         layout.addWidget(self.frame_log)

@@ -1,6 +1,8 @@
-"""右侧工具面板：CRC / 校验和 / 进制转换 / Hex转文件 / 自动回复。
+"""右侧工具面板：CRC / 校验和 / 进制转换 / Hex转文件 / 自动回复 / Modbus报文 + 插件。
 
-全局工具（与会话无强关联），布局针对 240-340px 窄宽度优化。
+导航采用「顶部下拉选择器 + 内容区」而非横向 Tab：
+- 在 260–440px 的窄 Dock 内不会出现 Tab 溢出的滚动箭头与标签截断；
+- 选择器按「内置 / 插件」分组，插件新增一项即可。
 """
 
 from PySide6.QtWidgets import (
@@ -8,9 +10,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
-    QTabWidget,
-    QFrame,
     QComboBox,
+    QFrame,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QLabel,
     QScrollArea,
+    QStackedWidget,
 )
 from PySide6.QtGui import QColor
 
@@ -37,7 +39,7 @@ from ..tools.conv import int_to_base, swap_endian, str_to_hex, hex_to_str
 from ..core.config import Config
 from ..core.autoreply import AutoReplyEngine
 from ..core.i18n import tr
-from ..core.theme import tokens
+from ..core.theme import tokens, icon, icon_pixmap
 
 
 class ToolsPanel(QWidget):
@@ -48,32 +50,111 @@ class ToolsPanel(QWidget):
         self.autoreply = autoreply
         self.config = config
         self.main_window = main_window
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("dock_tabs")
-        self.tabs.addTab(self._crc_tab(), tr("crc"))
-        self.tabs.addTab(self._checksum_tab(), tr("checksum"))
-        self.tabs.addTab(self._conv_tab(), tr("convert"))
-        self.tabs.addTab(self._hexfile_tab(), tr("hex_to_file"))
-        self.tabs.addTab(self._autoreply_tab(), tr("auto_reply"))
-        self.tabs.addTab(self._modbus_tab(), tr("modbus_frame"))
-        self._builtin_tab_count = self.tabs.count()
+        # 页面表：[(名称, 控件, 是否内置)]
+        self._pages: list = []
+        self._builtin_tab_count = 0
+        self._stack = QStackedWidget()
+
+        self._selector = QComboBox()
+        self._selector.setObjectName("tool_selector")
+        self._selector.currentIndexChanged.connect(self._on_selector_changed)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        self._header_icon = QLabel()
+        header.addWidget(self._header_icon)
+        header.addWidget(self._selector, 1)
+
+        # 内置工具页（按顺序）
+        builtin = [
+            (tr("crc"), self._crc_tab()),
+            (tr("checksum"), self._checksum_tab()),
+            (tr("convert"), self._conv_tab()),
+            (tr("hex_to_file"), self._hexfile_tab()),
+            (tr("auto_reply"), self._autoreply_tab()),
+            (tr("modbus_frame"), self._modbus_tab()),
+        ]
+        for name, widget in builtin:
+            self._append_page(name, widget, builtin=True)
+        self._builtin_tab_count = len(self._pages)
+        self._rebuild_selector()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(0)
-        layout.addWidget(self.tabs, 1)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addLayout(header)
+        layout.addWidget(self._stack, 1)
+        self.refresh_theme()
+
+    # ================= 页面与导航 =================
+    def _append_page(self, name: str, widget: QWidget, builtin: bool):
+        self._stack.addWidget(widget)
+        self._pages.append((name, widget, builtin))
+
+    def _add_group_header(self, text: str):
+        """在下拉中加入不可选的组标题（含上方分隔线）。"""
+        self._selector.insertSeparator(self._selector.count())
+        self._selector.addItem(text)
+        item = self._selector.model().item(self._selector.count() - 1)
+        if item is not None:
+            item.setEnabled(False)
+
+    def _rebuild_selector(self):
+        """按页面表重建下拉项（itemData 存 stack 索引，组标题为 None）。"""
+        current = self._stack.currentIndex()
+        self._selector.blockSignals(True)
+        self._selector.clear()
+        builtin_added = plugin_added = False
+        for idx, (name, _widget, builtin) in enumerate(self._pages):
+            if builtin and not builtin_added:
+                self._add_group_header(tr("tools_builtin"))
+                builtin_added = True
+            elif not builtin and not plugin_added:
+                self._add_group_header(tr("tools_plugins"))
+                plugin_added = True
+            self._selector.addItem(name, idx)
+        self._selector.blockSignals(False)
+        target = 0
+        for i in range(self._selector.count()):
+            if self._selector.itemData(i) == current:
+                target = i
+                break
+        else:
+            for i in range(self._selector.count()):
+                if self._selector.itemData(i) is not None:
+                    target = i
+                    break
+        self._selector.setCurrentIndex(target)
+        self._on_selector_changed(target)
+
+    def _on_selector_changed(self, index: int):
+        data = self._selector.itemData(index)
+        if data is not None:
+            self._stack.setCurrentIndex(int(data))
 
     def add_dock_tab(self, name, widget):
-        """添加 dock 型插件 Tab。"""
-        self.tabs.addTab(widget, name)
+        """添加 dock 型插件页。"""
+        self._append_page(name, widget, builtin=False)
+        self._rebuild_selector()
 
     def remove_plugin_tabs(self):
-        """移除所有非内置 Tab。"""
-        while self.tabs.count() > self._builtin_tab_count:
-            w = self.tabs.widget(self.tabs.count() - 1)
-            self.tabs.removeTab(self.tabs.count() - 1)
-            if w:
-                w.deleteLater()
+        """移除所有插件页（保留内置页）。"""
+        while len(self._pages) > self._builtin_tab_count:
+            _name, widget, _builtin = self._pages.pop()
+            self._stack.removeWidget(widget)
+            widget.deleteLater()
+        self._rebuild_selector()
+
+    def refresh_theme(self):
+        """主题切换后刷新头部图标。"""
+        self._header_icon.setPixmap(icon_pixmap("settings", tokens()["text_dim"], 16))
+
+    def current_tool_name(self) -> str:
+        """当前选中的工具名（便于测试与调试）。"""
+        data = self._selector.currentData()
+        if data is None:
+            return ""
+        return self._pages[int(data)][0]
 
     # ================= CRC =================
 

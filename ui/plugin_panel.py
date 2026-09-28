@@ -19,8 +19,11 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont
+
 from ..core.plugin_manager import PluginManager
 from ..core.i18n import tr
+from ..core.theme import tokens
 
 
 class PluginManagerWidget(QWidget):
@@ -56,6 +59,8 @@ class PluginManagerWidget(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(28)
         self.table.cellDoubleClicked.connect(self._on_cell_double_click)
         layout.addWidget(self.table)
 
@@ -71,19 +76,28 @@ class PluginManagerWidget(QWidget):
             chk_item.setCheckState(Qt.Checked if p.get("enabled", True) else Qt.Unchecked)
             self.table.setItem(i, 0, chk_item)
 
-            # 名称
-            self.table.setItem(i, 1, QTableWidgetItem(p["name"]))
+            # 名称（含版本/描述提示）
+            name_item = QTableWidgetItem(p["name"])
+            tip_lines = [f"{p['name']}  v{p.get('version') or '-'}"]
+            if p.get("author"):
+                tip_lines.append(str(p["author"]))
+            if p.get("description"):
+                tip_lines.append(str(p["description"]))
+            name_item.setToolTip("\n".join(tip_lines))
+            self.table.setItem(i, 1, name_item)
 
-            # 状态
+            # 状态（以状态色区分）
             status_text = tr("enabled") if ok else tr("error_or_disabled")
             status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor(tokens()["ok"] if ok else tokens()["err"]))
             self.table.setItem(i, 2, status_item)
 
-            # 错误信息（截断显示）
+            # 错误信息（截断显示，等宽便于阅读 traceback）
             err = p.get("error") or ""
             if len(err) > 200:
                 err = err[:200] + "..."
             err_item = QTableWidgetItem(err)
+            err_item.setFont(QFont("Consolas", 9))
             self.table.setItem(i, 3, err_item)
 
     def _on_refresh(self):
